@@ -1,0 +1,15 @@
+{
+  "name": "human-api",
+  "version": "1.0.0",
+  "description": "The AI talent protocol for ChatGPT & Gemini. Evolution: Email ➡️ Phone ➡️ AI Search. Instantly query, discover, and hire the exact people or services you need directly inside LLMs. The open-source human capability API & AI alternative to all social media.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

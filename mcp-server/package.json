@@ -1,0 +1,7 @@
+{
+  "name": "findme-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": { "findme-mcp": "index.mjs" },
+  "engines": { "node": ">=18" }
+}

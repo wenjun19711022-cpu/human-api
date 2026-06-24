@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FindMe · 对 AI 说出你要找的人</title>
+  <meta name="description" content="FindMe — describe who you need, AI finds real, verified people. 说出你要找的人，AI 带 TA 来。" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="brand"><span class="dot"></span><span data-i18n="brand">FindMe</span></div>
+    <div class="header-actions">
+      <a class="aibadge" href="/api/mcp" target="_blank" rel="noopener" data-i18n="aiBadge">⚡ AI 可调用</a>
+      <button id="beBtn" class="ghost" data-i18n="beBtn">成为可被发现的人</button>
+      <button id="langBtn">EN</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1 data-i18n="tagline">对 AI 说出你要找的人，TA 就会出现</h1>
+      <p class="sub muted" data-i18n="sub">不止招聘——招人、外包、找联合创始人、顾问、付费咨询、投资……一句话，AI 从经本人同意、可验证的真人里帮你找。</p>
+      <div class="find-card">
+        <textarea id="q" data-i18n-ph="qPh"></textarea>
+        <button id="findBtn" data-i18n="findBtn">找人</button>
+      </div>
+      <div class="examples">
+        <span class="muted" data-i18n="examples">试试：</span>
+        <button class="chip" data-i18n="ex1">找我附近最厉害的 10 个销售</button>
+        <button class="chip" data-i18n="ex2">找个能做出海品牌的设计联合创始人</button>
+        <button class="chip" data-i18n="ex3">要一位懂医疗的数据科学家做付费咨询</button>
+        <button class="chip" data-i18n="ex4">招一个增长营销负责人</button>
+      </div>
+      <div id="parsed" class="parsed hidden"></div>
+    </section>
+
+    <div id="resultsHead" class="results-head"></div>
+    <section id="results" class="grid"></section>
+    <section id="empty" class="hidden empty"><p class="muted" data-i18n="emptyMsg">没找到，换个说法试试，或放宽条件。</p></section>
+
+    <section class="ai-section">
+      <h3 data-i18n="aiTitle">这不只是网站——它是 AI 的「找人」接口</h3>
+      <p class="muted" data-i18n="aiDesc">任何 AI（ChatGPT / Claude / 你的 Agent）都能调用 FindMe 来找人。这是给 Agent 时代的「找人协议」。</p>
+      <pre class="code" id="aiCode"></pre>
+      <a class="link" href="/api/mcp" target="_blank" rel="noopener" data-i18n="aiLink">查看工具清单 /api/mcp →</a>
+    </section>
+  </main>
+
+  <footer><span data-i18n="foot">FindMe · 演示版 Demo · 经同意 / 可验证 / 可被 AI 调用</span></footer>
+  <div id="overlay" class="hidden"></div>
+  <script id="jsonld" type="application/ld+json"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
