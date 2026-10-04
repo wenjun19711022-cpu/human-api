@@ -2,6 +2,8 @@
 
 **Evolution: Email ➡️ Phone ➡️ AI Search**
 
+> **Also in this repo: [Slice](slice/README.md)** — a global exchange where anyone can buy a slice of a real business with USDT (escrowed rounds, AI due diligence, bonded dividend promises, confidence markets). Contracts, AI agent and app live in [`slice/`](slice/).
+
 Instantly query, discover, and hire the exact people or services you need directly inside LLMs.
 
 The open-source human capability API & AI alternative to all social media.

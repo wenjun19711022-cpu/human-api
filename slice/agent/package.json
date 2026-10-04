@@ -1,0 +1,26 @@
+{
+  "name": "@slice/agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Slice AI due-diligence agent: verifies a business before it can go on-chain.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "audit": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "viem": "^2.57.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

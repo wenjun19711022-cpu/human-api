@@ -1,0 +1,41 @@
+{
+  "business": {
+    "name": "Neon Coyote Bar",
+    "category": "bar",
+    "description": "Cocktail bar with live music, 85 seats, open 6pm-2am. Fictional example application.",
+    "country": "US",
+    "city": "Los Angeles",
+    "address": "1200 Example Blvd, Los Angeles, CA 90026",
+    "website": "https://example.com/neon-coyote",
+    "instagram": "@neoncoyote_example",
+    "links": []
+  },
+  "owner": { "fullName": "Jordan Example", "role": "managing member" },
+  "registry": { "entityName": "Neon Coyote Bar LLC", "jurisdiction": "us_ca" },
+  "financials": {
+    "claimedMonthlyRevenue": 98000,
+    "monthlyDeposits": [
+      { "period": "2025-10", "amount": 91200 },
+      { "period": "2025-11", "amount": 88400 },
+      { "period": "2025-12", "amount": 112300 },
+      { "period": "2026-01", "amount": 84100 },
+      { "period": "2026-02", "amount": 86900 },
+      { "period": "2026-03", "amount": 95800 },
+      { "period": "2026-04", "amount": 97200 },
+      { "period": "2026-05", "amount": 101500 },
+      { "period": "2026-06", "amount": 104300 },
+      { "period": "2026-07", "amount": 108900 },
+      { "period": "2026-08", "amount": 103700 },
+      { "period": "2026-09", "amount": 99600 }
+    ],
+    "depositTransactions": []
+  },
+  "offering": {
+    "instrument": "equity",
+    "percentOffered": 30,
+    "targetRaise": 300000,
+    "dividendPerPeriod": 9000,
+    "periodDays": 90
+  },
+  "reportLanguage": "zh"
+}
