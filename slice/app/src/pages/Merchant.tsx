@@ -16,9 +16,11 @@ import {
   fastForward,
   faucet,
   merchantGrant,
+  contributeDividend,
 } from "../engine/actions";
+import { roundView } from "../engine/view";
 import { agentUrl, coverage, realAudit, simulateAudit, type AuditStep } from "../engine/audit";
-import { dueDate, yieldAt } from "../engine/market";
+import { dueDate, requiredBondPeriods, yieldAt } from "../engine/market";
 import { COUNTRIES } from "../engine/geo";
 import { CATEGORY, Meter, Seg, StagePill, StatusDot, Stepper, Tile, TrustRing } from "../components/ui";
 import { QA } from "../components/AssetParts";
@@ -301,12 +303,15 @@ function StepTerms({ set }: { set: Setter }) {
           <Field label={tr("承诺期数", "Number of periods")}>
             <input className="input num" id="t-n" value={d.numPeriods} onChange={(e) => set({ numPeriods: Math.max(1, Math.min(60, num(e.target.value))) })} />
           </Field>
-          <Field label={tr("保证金（期数）", "Bond (periods)")}>
-            <select className="input" id="t-bond" value={d.bondPeriods} onChange={(e) => set({ bondPeriods: Number(e.target.value) })}>
-              <option value={1}>1 · {usd(d.perPeriod)}</option>
-              <option value={2}>2 · {usd(d.perPeriod * 2)}</option>
-              <option value={4}>4 · {usd(d.perPeriod * 4)}</option>
-            </select>
+          <Field label={tr("定价方式", "Pricing")}>
+            <Seg
+              value={d.pricing}
+              onChange={(v) => set({ pricing: v })}
+              items={[
+                { id: "auction", label: tr("市场出价", "Market bids") },
+                { id: "fixed", label: tr("固定价", "Fixed") },
+              ]}
+            />
           </Field>
         </div>
         <div className="spread">
@@ -348,8 +353,16 @@ function StepTerms({ set }: { set: Setter }) {
               </div>
             )}
             <div>
-              <span className="k">{tr("你需要存入保证金", "Bond you post")}</span>
-              <span className="v">{usd(d.perPeriod * d.bondPeriods)}</span>
+              <span className="k">{tr("保证金（按信任分定价）", "Bond (priced by trust)")}</span>
+              <span className="v">
+                {usd(d.perPeriod)} – {usd(d.perPeriod * 4)}
+              </span>
+              <span className="s">{tr("A 1 期 · B 2 期 · C 3 期 · 更低 4 期", "A 1 · B 2 · C 3 · lower 4 periods")}</span>
+            </div>
+            <div>
+              <span className="k">{tr("定价", "Pricing")}</span>
+              <span className="v">{d.pricing === "auction" ? "$1.00 – $1.28" : "$1.00"}</span>
+              <span className="s">{d.pricing === "auction" ? tr("投资人出价，统一清算", "investors bid, one clearing price") : tr("超额按比例分配", "oversubscription pro rata")}</span>
             </div>
           </div>
         </div>
@@ -469,7 +482,10 @@ function Dashboard({ a }: { a: Asset }) {
   const [raise, setRaise] = React.useState(String(Math.round(c.perPeriod * 1.2)));
   const next = c.status.indexOf("pending");
   const due = next === -1 ? null : dueDate(c, next);
-  const bond = c.perPeriod * (S.draft.bondPeriods || 1);
+  const bondPeriods = requiredBondPeriods(a.audit?.trustScore ?? 0, S.me.merchantDefaults);
+  const bond = a.stage === "qa" ? c.perPeriod * bondPeriods : c.bond;
+  const [installment, setInstallment] = React.useState(String(Math.round(c.perPeriod / 4)));
+  const rv = roundView(a);
 
   const onFileHash = (fn: (h: string) => void) => async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -526,15 +542,19 @@ function Dashboard({ a }: { a: Asset }) {
             <div className="kv">
               <div>
                 <span className="k">{tr("融资目标", "Target")}</span>
-                <span className="v">{usdCompact(o.sharesForSale * o.price)}</span>
+                <span className="v">{usdCompact(o.sharesForSale * o.prices[0])}</span>
               </div>
               <div>
                 <span className="k">{tr("保证金", "Bond")}</span>
                 <span className="v">{usd(bond)}</span>
+                <span className="s">{tr(`${bondPeriods} 期 · 信任分 ${a.audit?.trustScore ?? "—"}`, `${bondPeriods} period(s) · score ${a.audit?.trustScore ?? "—"}`)}</span>
               </div>
             </div>
             <p className="muted" style={{ fontSize: 12.5 }}>
-              {tr("保证金从你的钱包锁进合约；按时分红就不会被动用，全部期数结束后退回。", "The bond moves from your wallet into the contract. Pay on time and it's never touched; it comes back after the last period.")}
+              {tr(
+                `保证金倍数由 AI 信任分决定（A 1 期 · B 2 期 · C 3 期 · 更低 4 期）${S.me.merchantDefaults ? `，你有 ${S.me.merchantDefaults} 次违约记录，多押 ${S.me.merchantDefaults} 期` : ""}。按时分红就不会被动用，全部期数结束后退回。`,
+                `The bond multiple comes from your AI trust score (A 1 · B 2 · C 3 · lower 4 periods)${S.me.merchantDefaults ? `, plus ${S.me.merchantDefaults} for your default record` : ""}. Pay on time and it's never touched; it comes back after the last period.`,
+              )}
             </p>
             {S.me.usdt < bond && (
               <div className="callout warn">
@@ -558,11 +578,17 @@ function Dashboard({ a }: { a: Asset }) {
         <div className="two">
           <div className="card stack">
             <h3>{tr("认购进行中", "Round in progress")}</h3>
-            <Meter value={o.raised / (o.sharesForSale * o.price)} />
+            <Meter value={Math.min(1, rv.coverage)} />
             <div className="kv">
               <div>
-                <span className="k">{tr("已认购", "Raised")}</span>
-                <span className="v">{usdCompact(o.raised)}</span>
+                <span className="k">{tr("已认购", "Committed")}</span>
+                <span className="v">{usdCompact(o.committed)}</span>
+                <span className="s">{tr(`${rv.coverage.toFixed(2)} 倍`, `${rv.coverage.toFixed(2)}x`)}</span>
+              </div>
+              <div>
+                <span className="k">{tr("预计清算价", "Clearing now")}</span>
+                <span className="v">${rv.clearing.price.toFixed(4)}</span>
+                <span className="s">{tr(`预计融到 ${usdCompact(rv.clearing.raised)}`, `${usdCompact(rv.clearing.raised)} raised`)}</span>
               </div>
               <div>
                 <span className="k">{tr("认购人数", "Investors")}</span>
@@ -677,24 +703,50 @@ function Dashboard({ a }: { a: Asset }) {
               ) : (
                 <>
                   <div className="spread">
-                    <span className="big-price gold">{usd(c.perPeriod)}</span>
+                    <span className="big-price gold">{usd(c.perPeriod - c.credit[next])}</span>
                     <span className="muted" style={{ textAlign: "right", fontSize: 13 }}>
-                      {tr(`第 ${next + 1} 期 · ${date(due)}`, `Period ${next + 1} · ${date(due)}`)}
+                      {tr(`第 ${next + 1} 期还差 · ${date(due)}`, `Still owed for period ${next + 1} · ${date(due)}`)}
                       <br />
                       {t < due ? countdown(due, t) : tr(`宽限期剩 ${countdown(due + c.graceDays * 86_400_000, t)}`, `${countdown(due + c.graceDays * 86_400_000, t)} of grace left`)}
                     </span>
                   </div>
+                  <div className="stack tight">
+                    <div className="spread muted" style={{ fontSize: 12.5 }}>
+                      <span>{a.router ? tr("收入直连已到账", "Arrived via direct revenue") : tr("本期已付", "Paid so far")}</span>
+                      <span className="num">
+                        {usd(c.credit[next])} / {usd(c.perPeriod)}
+                      </span>
+                    </div>
+                    <Meter value={c.credit[next] / c.perPeriod} tone="gold" />
+                  </div>
                   {t > due && (
                     <div className="callout bad">
                       <ILock />
-                      <span>{tr("已过到期日。宽限期结束仍未支付，保证金会被罚没分给持有人，并永久记录违约。", "Past due. If unpaid by the end of grace, your bond is slashed to holders and the default is recorded for good.")}</span>
+                      <span>{tr("已过到期日。宽限期结束仍未付足，保证金会补差额给持有人，平台这一期的费用也让给持有人，违约永久记录并提高你以后的保证金。", "Past due. If still short when grace ends, the bond covers the gap for holders, the platform forfeits this period's fee to them, and the default is recorded and raises your future bonds.")}</span>
+                    </div>
+                  )}
+                  {a.router && (
+                    <div className="callout">
+                      <ISpark />
+                      <span style={{ fontSize: 13 }}>
+                        {tr(
+                          `收入直连：付款方每天把钱打进路由合约，${a.router.holderBps / 100}% 自动计入本期承诺，其余直接到你钱包。累计已给持有人 ${usdCompact(a.router.toHolders)}。`,
+                          `Direct revenue: payers send money into the router daily; ${a.router.holderBps / 100}% counts toward this period automatically and the rest lands in your wallet. ${usdCompact(a.router.toHolders)} to holders so far.`,
+                        )}
+                      </span>
                     </div>
                   )}
                   <button className="btn gold lg block" onClick={() => run(() => payDividend(a.id, next))}>
-                    {tr(`支付第 ${next + 1} 期分红`, `Pay period ${next + 1}`)}
+                    {tr(`补足第 ${next + 1} 期（${usd(c.perPeriod - c.credit[next])}）`, `Pay the rest of period ${next + 1} (${usd(c.perPeriod - c.credit[next])})`)}
                   </button>
+                  <div className="row">
+                    <input className="input num" id="installment" value={installment} onChange={(e) => setInstallment(e.target.value.replace(/[^0-9.]/g, ""))} aria-label={tr("分期金额", "Installment")} />
+                    <button className="btn ghost" onClick={() => run(() => contributeDividend(a.id, Number(installment)))}>
+                      {tr("先付一部分", "Pay a part now")}
+                    </button>
+                  </div>
                   <p className="muted" style={{ fontSize: 12.5 }}>
-                    {tr("付款进入合约后自动按持股比例分给每一位持有人。", "Once paid into the contract it's split across every holder pro rata.")}
+                    {tr("可以按周或按天把营业款打进合约，钱立即按持股分给持有人，自动计入最早一期承诺。", "Pay weekly or daily from your takings: it goes to holders immediately and fills the earliest open period.")}
                   </p>
                 </>
               )}
@@ -711,7 +763,7 @@ function Dashboard({ a }: { a: Asset }) {
                 </button>
               </div>
               <span className="muted" style={{ fontSize: 12.5 }}>
-                {tr(`当前每期 ${usd(c.perPeriod)}，保证金 ${usd(c.bond)}`, `Now ${usd(c.perPeriod)} per period with a ${usd(c.bond)} bond`)}
+                {tr(`当前每期 ${usd(c.perPeriod)}，保证金 ${usd(c.bond)}（需覆盖 ${c.bondPeriods} 期）`, `Now ${usd(c.perPeriod)} per period with a ${usd(c.bond)} bond (must cover ${c.bondPeriods} period(s))`)}
               </span>
             </div>
           </div>

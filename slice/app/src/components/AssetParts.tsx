@@ -5,6 +5,9 @@ import { ask, answer, bet, claimBet, markEvasive, run, upvote } from "../engine/
 import { dueDate, mergeBook, myPayout, potentialPayout, record, yesPrice } from "../engine/market";
 import { liveMarket } from "../engine/ops";
 import { Bars } from "./charts";
+import { DemandLadder } from "./TradePanel";
+import { roundView } from "../engine/view";
+import { requiredBondPeriods } from "../engine/market";
 import { Flag, Meter, StatusDot, TrustRing, gradeTone } from "./ui";
 import { IAlert, IChat, ICheck, IClock, IFile, ILock, IShield, ISpark, IThumb } from "./icons";
 import { l, tr } from "../lib/i18n";
@@ -354,6 +357,19 @@ export function CommitmentView({ a }: { a: Asset }) {
             <span className="v">{usdCompact(a.distributed)}</span>
           </div>
         </div>
+        {next !== -1 && a.stage === "trading" && (
+          <div className="stack tight">
+            <div className="spread" style={{ fontSize: 13 }}>
+              <span className="muted">
+                {a.router ? tr("本期已通过收入直连到账", "Arrived this period via direct revenue") : tr("本期已到账（可分期付款）", "Paid in so far this period (installments allowed)")}
+              </span>
+              <b className="num">
+                {usd(c.credit[next])} / {usd(c.perPeriod)}
+              </b>
+            </div>
+            <Meter value={c.credit[next] / c.perPeriod} tone="gold" />
+          </div>
+        )}
         <Bars
           values={values}
           labels={labels}
@@ -380,12 +396,58 @@ export function CommitmentView({ a }: { a: Asset }) {
           </span>
         </div>
       </div>
+      <div className="three">
+        <div className="card stack tight">
+          <span className="eyebrow">{tr("保证金按信用定价", "Bond priced by trust")}</span>
+          <b className="num" style={{ fontSize: 18 }}>
+            {usd(c.bond)} · {tr(`${c.bondPeriods} 期`, `${c.bondPeriods} period${c.bondPeriods > 1 ? "s" : ""}`)}
+          </b>
+          <span className="muted" style={{ fontSize: 12.5 }}>
+            {tr(
+              `AI 信任分 ${a.audit?.trustScore ?? "—"} → 需押 ${requiredBondPeriods(a.audit?.trustScore ?? 0, 0)} 期（A 1 期 · B 2 期 · C 3 期 · 更低 4 期），每有一次违约记录再加 1 期。`,
+              `AI score ${a.audit?.trustScore ?? "—"} → ${requiredBondPeriods(a.audit?.trustScore ?? 0, 0)} period(s) (A 1 · B 2 · C 3 · lower 4), plus one more for every default on record.`,
+            )}
+          </span>
+        </div>
+        <div className="card stack tight">
+          <span className="eyebrow">{tr("平台费按期兑现", "Platform fee vests")}</span>
+          <b className="num" style={{ fontSize: 18 }}>
+            {usd(c.feeRemaining)} {tr("锁定中", "locked")}
+          </b>
+          <span className="muted" style={{ fontSize: 12.5 }}>
+            {tr(
+              `平台只预收 1%，另外 2% 锁在金库里，每按时兑现一期才释放一份。已释放给平台 ${usd(c.feeToPlatform)}，因延迟或违约让给持有人 ${usd(c.feeToHolders)}。`,
+              `The platform takes 1% up front; another 2% sits in the vault and releases one slice per on-time period. Released ${usd(c.feeToPlatform)}; ${usd(c.feeToHolders)} forfeited to holders for late or missed periods.`,
+            )}
+          </span>
+        </div>
+        <div className="card stack tight">
+          <span className="eyebrow">{tr("收入直连", "Direct revenue")}</span>
+          {a.router ? (
+            <>
+              <b className="num" style={{ fontSize: 18 }}>
+                {usdCompact(a.router.toHolders)} {tr("已直达持有人", "to holders")}
+              </b>
+              <span className="muted" style={{ fontSize: 12.5 }}>
+                {tr(
+                  `付款方（发行商、应用商店、支付平台）直接把钱打进路由合约，${a.router.holderBps / 100}% 自动进入分红金库，其余给商户。商户碰不到持有人那一份。`,
+                  `The payer (distributor, app store, processor) pays the router contract directly: ${a.router.holderBps / 100}% goes straight to the dividend vault, the rest to the merchant, who never touches the holders' share.`,
+                )}
+              </span>
+            </>
+          ) : (
+            <span className="muted" style={{ fontSize: 12.5 }}>
+              {tr("这门生意按利润分红，由商户每期付款（可分期），未付部分由保证金赔付。", "This business pays from profit: the merchant pays each period (installments allowed) and the bond covers anything missing.")}
+            </span>
+          )}
+        </div>
+      </div>
       <div className="callout gold">
         <ILock />
         <span>
           {tr(
-            `规则写在合约里：到期后有 ${c.graceDays} 天宽限期；仍未付款，任何人都可以触发罚没，保证金直接按持股比例分给持有人，违约记录永久上链。商户想提高承诺，必须先追加保证金。`,
-            `The rules live in the contract: ${c.graceDays} days of grace after each due date; if still unpaid, anyone can trigger the slash, the bond goes straight to holders pro rata, and the default stays on-chain. To promise more, the merchant must post more bond first.`,
+            `规则写在合约里：到期后有 ${c.graceDays} 天宽限期；仍未付足，任何人都可以触发罚没，保证金只补差额，直接按持股比例分给持有人，违约记录永久上链并提高这位商户以后的保证金。商户想提高承诺，必须先追加保证金。`,
+            `The rules live in the contract: ${c.graceDays} days of grace after each due date; if still short, anyone can trigger the slash, the bond covers only the shortfall and goes straight to holders pro rata, and the default stays on-chain and raises this merchant's future bonds. To promise more, the merchant must post more bond first.`,
           )}
         </span>
       </div>
@@ -537,6 +599,49 @@ export function OrderBookView({ a }: { a: Asset }) {
   );
 }
 
+// ------------------------------------------------------------------ launch round
+
+function RoundCard({ a }: { a: Asset }) {
+  const o = a.offering;
+  const r = roundView(a);
+  return (
+    <div className="card stack">
+      <div className="spread">
+        <h3>{r.auction ? tr("认购簿 · 统一清算价拍卖", "Round book · uniform-price auction") : tr("认购进度", "Round progress")}</h3>
+        <span className="pill">{tr(`${r.coverage.toFixed(2)} 倍`, `${r.coverage.toFixed(2)}x`)}</span>
+      </div>
+      <Meter value={Math.min(1, r.coverage)} />
+      <div className="kv">
+        <div>
+          <span className="k">{tr("已认购", "Committed")}</span>
+          <span className="v">{usdCompact(o.committed)}</span>
+        </div>
+        <div>
+          <span className="k">{tr("目标", "Target")}</span>
+          <span className="v">{usdCompact(r.target)}</span>
+        </div>
+        <div>
+          <span className="k">{tr("预计清算价", "Clearing now")}</span>
+          <span className="v">{fmtPrice(r.clearing.price)}</span>
+        </div>
+        <div>
+          <span className="k">{tr("认购人数", "Investors")}</span>
+          <span className="v">{o.investors.toLocaleString()}</span>
+        </div>
+      </div>
+      <DemandLadder a={a} />
+      <p className="muted" style={{ fontSize: 12.5 }}>
+        {r.auction
+          ? tr(
+              "每个人报自己能接受的最高价。截止时找出一个能卖完全部份额的最高价，所有成交的人都按这个价付钱；刚好在清算价上的按比例成交，低于清算价的全额退回。",
+              "Everyone names the most they'd pay. At the deadline the contract finds the highest price that still sells every share, and everyone who fills pays that one price; bids exactly at it fill pro rata, bids below it are refunded in full.",
+            )
+          : tr("固定价格。超额认购时所有人按比例成交，不拼手速；截止前 48 小时不能撤单。", "Fixed price. If oversubscribed everyone fills pro rata, no racing; no cancelling in the final 48 hours.")}
+      </p>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ documents
 
 const KIND: Record<string, [string, string]> = {
@@ -635,30 +740,7 @@ export function Overview({ a }: { a: Asset }) {
         </div>
         <Bars values={a.monthly} labels={labels} format={(v) => usd(v)} tone={() => "var(--accent)"} />
       </div>
-      {a.stage === "ipo" && (
-        <div className="card stack">
-          <h3>{tr("认购进度", "Round progress")}</h3>
-          <Meter value={a.offering.raised / (a.offering.sharesForSale * a.offering.price)} />
-          <div className="kv">
-            <div>
-              <span className="k">{tr("已认购", "Raised")}</span>
-              <span className="v">{usdCompact(a.offering.raised)}</span>
-            </div>
-            <div>
-              <span className="k">{tr("目标", "Target")}</span>
-              <span className="v">{usdCompact(a.offering.sharesForSale * a.offering.price)}</span>
-            </div>
-            <div>
-              <span className="k">{tr("最低成团", "Minimum")}</span>
-              <span className="v">{usdCompact(a.offering.minRaise)}</span>
-            </div>
-            <div>
-              <span className="k">{tr("认购人数", "Investors")}</span>
-              <span className="v">{a.offering.investors.toLocaleString()}</span>
-            </div>
-          </div>
-        </div>
-      )}
+      {a.stage === "ipo" && <RoundCard a={a} />}
       <div className="callout">
         <IAlert />
         <span style={{ fontSize: 13 }}>

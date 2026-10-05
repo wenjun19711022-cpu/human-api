@@ -4,7 +4,8 @@ import { attest, resolveDispute, run } from "../engine/actions";
 import { Empty, Tile } from "../components/ui";
 import { IShield, IScale, ISpark, IFile } from "../components/icons";
 import { l, tr } from "../lib/i18n";
-import { ago, countdown, shortHash, usd } from "../lib/format";
+import { ago, countdown, shortHash, usd, TIME } from "../lib/format";
+import { orderView } from "../engine/view";
 import { go } from "../lib/nav";
 
 export function Console() {
@@ -78,11 +79,17 @@ export function Console() {
                   <Tile a={a} />
                   <div className="grow stack tight" style={{ gap: 1 }}>
                     <b>
-                      {a.name} · {usd(e.paid, 2)}
+                      {a.name} · {usd(orderView(a, e).cost, 2)}
                     </b>
                     <span className="muted" style={{ fontSize: 12.5 }}>
                       {tr("理由：", "Reason: ")}
-                      {e.disputeReason}
+                      {e.disputeReason} · {tr("押金", "bond")} {usd(e.disputeBond ?? 0, 2)}
+                    </span>
+                    <span className={t > (e.disputedAt ?? t) + 14 * TIME.DAY ? "down" : "muted"} style={{ fontSize: 12.5 }}>
+                      {tr(
+                        `请在 ${countdown((e.disputedAt ?? t) + 14 * TIME.DAY, t)}内裁决，否则投资人可自行全额退款（平台失职由平台承担）`,
+                        `Rule within ${countdown((e.disputedAt ?? t) + 14 * TIME.DAY, t)}, or the investor can refund themselves`,
+                      )}
                     </span>
                   </div>
                   <div className="row">
@@ -90,7 +97,7 @@ export function Console() {
                       {tr("退款给投资人", "Refund investor")}
                     </button>
                     <button className="btn sm ghost" onClick={() => run(() => resolveDispute(e.id, false))}>
-                      {tr("交割有效，放款", "Delivery stands")}
+                      {tr("交割有效，押金归商户", "Delivery stands; bond to merchant")}
                     </button>
                   </div>
                 </div>

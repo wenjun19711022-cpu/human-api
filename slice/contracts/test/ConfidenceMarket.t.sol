@@ -48,7 +48,7 @@ contract ConfidenceMarketTest is Base {
         confidence.claim(id);
         // 1000 stake + 500 losing pool - 2% fee on the losing pool
         assertEq(usdt.balanceOf(alice) - before, 1_490e6);
-        assertEq(usdt.balanceOf(treasury), 9_000e6 + 10e6, "raise fee + market fee");
+        assertEq(usdt.balanceOf(treasury), 3_000e6 + 1_500e6 + 10e6, "upfront fee + on-time fee slice + market fee");
 
         vm.prank(carol);
         assertEq(confidence.claim(id), 0);

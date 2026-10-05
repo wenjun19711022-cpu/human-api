@@ -10,6 +10,13 @@ interface ISliceHub {
     function isArbitrator(address account) external view returns (bool);
     function isShareToken(address token) external view returns (bool);
     function isVault(address vault) external view returns (bool);
+    /// @notice Called by a CommitmentVault when its merchant defaults; raises that merchant's future bond.
+    function recordDefault(address merchant) external;
+}
+
+/// @notice Where an offering sends the vested part of the platform fee.
+interface IPlatformFeeSink {
+    function depositPlatformFee(uint256 amount) external;
 }
 
 /// @notice Optional transfer gate (KYC allow-list, jurisdiction rules). address(0) = open transfers.

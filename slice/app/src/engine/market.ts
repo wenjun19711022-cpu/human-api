@@ -2,15 +2,80 @@
  * Pure market math. Every rule here mirrors a contract in slice/contracts/src so the demo behaves like the
  * chain: ShareToken dividends, ShareExchange taker fees and sweep order, ConfidenceMarket parimutuel payouts.
  */
-import type { Asset, BookLevel, Commitment, ConfMarket, Position } from "./types";
+import type { Asset, BookLevel, Clearing, Commitment, ConfMarket, Offering, Position } from "./types";
 import { TIME } from "../lib/format";
 
 export const TAKER_FEE = 0.005; // ShareExchange takerFeeBps = 50
-export const RAISE_FEE = 0.03; // SliceHub raiseFeeBps = 300
+export const UPFRONT_FEE_BPS = 100; // SliceHub.upfrontFeeBps
+export const VESTED_FEE_BPS = 200; // SliceHub.vestedFeeBps
+export const CANCEL_CUTOFF_DAYS = 2; // EscrowOffering.CANCEL_CUTOFF
+export const DISPUTE_BOND_BPS = 200; // EscrowOffering.DISPUTE_BOND_BPS
+export const ARBITRATION_DAYS = 14; // EscrowOffering.ARBITRATION_WINDOW
 export const CONF_FEE = 0.02; // ConfidenceMarket feeBps = 200
 
 export const round2 = (x: number) => Math.round(x * 100) / 100;
 export const round6 = (x: number) => Math.round(x * 1e6) / 1e6;
+
+// ------------------------------------------------------------------ launch round (EscrowOffering)
+
+/** Price ladder: floor, then +tickBps per step. One step = fixed price. */
+export function ladder(floor: number, tickBps: number, n: number): number[] {
+  const out: number[] = [];
+  let p = floor;
+  for (let i = 0; i < n; i++) {
+    out.push(p);
+    p = (p * (10_000 + tickBps)) / 10_000;
+  }
+  return out;
+}
+
+/** Mirrors EscrowOffering.previewClearing: one uniform price for everybody. */
+export function clear(prices: number[], tickBudget: number[], supply: number): Clearing {
+  let above = 0;
+  for (let t = prices.length - 1; t >= 0; t--) {
+    const withTick = above + tickBudget[t];
+    if (withTick / prices[t] >= supply - 1e-9) {
+      let price = Math.max(prices[t], above / supply);
+      let marginal = 0;
+      if (price <= prices[t] * (1 + 1e-12)) {
+        price = prices[t];
+        const left = supply - above / price;
+        marginal = Math.min(left * price, tickBudget[t]);
+      }
+      return { tick: t, price, atFloor: false, marginal, raised: above + marginal };
+    }
+    above = withTick;
+  }
+  return { tick: 0, price: prices[0], atFloor: true, marginal: tickBudget[0], raised: above };
+}
+
+export function previewClearing(o: Offering): Clearing {
+  return o.clearing ?? clear(o.prices, o.tickBudget, o.sharesForSale);
+}
+
+/** Mirrors EscrowOffering.allocation: what a bid fills at the clearing price. */
+export function allocation(o: Offering, bid: { budget: number; tick: number }): { cost: number; shares: number } {
+  const c = previewClearing(o);
+  let cost = 0;
+  if (c.atFloor || bid.tick > c.tick) cost = bid.budget;
+  else if (bid.tick === c.tick && c.marginal > 0) cost = (bid.budget * c.marginal) / o.tickBudget[c.tick];
+  return { cost, shares: cost / c.price };
+}
+
+/** Demand at the floor price relative to supply (1.2 = 1.2x oversubscribed). */
+export function coverage(o: Offering): number {
+  return o.committed / o.prices[0] / o.sharesForSale;
+}
+
+export function raisedOf(o: Offering): number {
+  return previewClearing(o).raised;
+}
+
+/** Mirrors SliceHub.requiredBondPeriods: A 1, B 2, C 3, below 4, +1 per default on record. */
+export function requiredBondPeriods(score: number, defaults: number): number {
+  const base = score >= 85 ? 1 : score >= 75 ? 2 : score >= 60 ? 3 : 4;
+  return base + defaults;
+}
 
 // ------------------------------------------------------------------ commitment
 
@@ -179,16 +244,20 @@ export function potentialPayout(m: ConfMarket, side: "yes" | "no", amount: numbe
   return amount + (amount * losing * (1 - CONF_FEE)) / winning;
 }
 
-/** Mirrors ConfidenceMarket.payoutOf for my stakes after resolution. */
-export function myPayout(m: ConfMarket): number {
+/** Mirrors ConfidenceMarket.payoutOf for any holder's stakes after resolution. */
+export function payoutOf(m: ConfMarket, yesStake: number, noStake: number): number {
   if (!m.resolved) return 0;
   const yesWon = m.resolved === "yes";
   const winning = yesWon ? m.yes : m.no;
   const losing = yesWon ? m.no : m.yes;
-  const stake = yesWon ? m.myYes : m.myNo;
-  if (winning === 0) return yesWon ? m.myNo : m.myYes;
+  const stake = yesWon ? yesStake : noStake;
+  if (winning === 0) return yesWon ? noStake : yesStake; // nobody to pay: everyone refunded
   if (stake === 0) return 0;
   return stake + (stake * losing * (1 - CONF_FEE)) / winning;
+}
+
+export function myPayout(m: ConfMarket): number {
+  return payoutOf(m, m.myYes, m.myNo);
 }
 
 // ------------------------------------------------------------------ price stats

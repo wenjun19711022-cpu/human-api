@@ -5,9 +5,11 @@
 import type { Asset, Audit, Category, Doc, DocKind, Draft, L } from "./types";
 import { S, botBook, commit, getAsset, nextId, now, refreshBook, toastL, ui } from "./store";
 import {
+  addBid,
   badge,
   checkGlobal,
   confirmOrder,
+  contribute,
   deliver,
   ensureMarket,
   feed,
@@ -15,14 +17,31 @@ import {
   mePerson,
   notice,
   pushPrice,
-  recordPayment,
+  refundOrder,
+  reinvestAsset,
 } from "./ops";
-import { TAKER_FEE, claimable, dueDate, emptyPosition, moveShares, myPayout, round2, sweep } from "./market";
+import {
+  ARBITRATION_DAYS,
+  CANCEL_CUTOFF_DAYS,
+  DISPUTE_BOND_BPS,
+  TAKER_FEE,
+  UPFRONT_FEE_BPS,
+  VESTED_FEE_BPS,
+  allocation,
+  claimable,
+  dueDate,
+  emptyPosition,
+  ladder,
+  moveShares,
+  myPayout,
+  requiredBondPeriods,
+  sweep,
+} from "./market";
 import { TIME } from "../lib/format";
 import { tr } from "../lib/i18n";
 import { fakeHash } from "../lib/rand";
 import { defaultDraft } from "./seed";
-import { advance, processLifecycle } from "./sim";
+import { advance, autoReinvest, processLifecycle } from "./sim";
 
 const DAY = TIME.DAY;
 const L_ = (zh: string, en: string): L => ({ zh, en });
@@ -75,39 +94,31 @@ export function merchantGrant() {
 
 // ------------------------------------------------------------------ launch rounds (EscrowOffering)
 
-export function subscribe(assetId: string, amount: number) {
+export function subscribe(assetId: string, tick: number, amount: number) {
   const a = asset(assetId);
   const o = a.offering;
   need(a.stage === "ipo", "这个资产当前不在认购期", "This asset isn't taking subscriptions right now");
   need(now() < o.deadline, "认购已截止", "The round has closed");
+  need(tick >= 0 && tick < o.prices.length, "请选择出价", "Pick a price");
   need(amount >= 1, "最低认购 $1", "Minimum is $1");
   need(amount <= S.me.usdt + 1e-9, "USDT 余额不足，先去「我的」领取测试 USDT", "Not enough USDT. Get test USDT under Me.");
   need(!a.mine, "商户不能认购自己的资产", "Merchants can't subscribe to their own round");
-  const remaining = o.sharesForSale - o.sold;
-  need(remaining > 1e-9, "额度已售罄", "Sold out");
-  let shares = amount / o.price;
-  let cost = amount;
-  if (shares > remaining) {
-    shares = remaining;
-    cost = remaining * o.price;
-  }
-  S.me.usdt -= cost;
-  o.sold += shares;
-  o.raised += cost;
   let e = S.me.escrow.find((x) => x.assetId === a.id && x.state === "active");
+  need(!e || e.tick === tick, "同一轮只能有一个出价。要改价，先取消再重新出价", "One price per round. To change it, cancel and bid again");
+  S.me.usdt -= amount;
+  addBid(a, tick, amount);
   if (!e) {
-    e = { id: nextId("e"), assetId: a.id, paid: 0, shares: 0, state: "active", at: now() };
+    e = { id: nextId("e"), assetId: a.id, budget: 0, tick, withdrawn: 0, state: "active", at: now() };
     S.me.escrow.unshift(e);
     o.investors += 1;
   }
-  e.paid = round2(e.paid + cost);
-  e.shares += shares;
-  feed("subscribe", mePerson(), a.id, Math.round(cost));
+  e.budget += amount;
+  feed("subscribe", mePerson(), a.id, Math.round(amount));
   gainXp(25);
   badge("early");
   badge("first");
   ui.emit({ type: "confetti" });
-  return { shares, cost };
+  return allocation(o, e);
 }
 
 export function cancelSubscription(orderId: string) {
@@ -115,12 +126,26 @@ export function cancelSubscription(orderId: string) {
   need(e && e.state === "active", "订单不可取消", "This order can't be cancelled");
   const a = asset(e.assetId);
   need(a.stage === "ipo", "认购已截止，不能再取消；若认购失败会自动可退款", "The round has closed; if it fails you can refund");
-  a.offering.sold -= e.shares;
-  a.offering.raised -= e.paid;
+  need(now() + CANCEL_CUTOFF_DAYS * DAY < a.offering.deadline, "截止前 48 小时内不能撤单（防止最后一刻撤单让整轮流拍）", "No cancelling in the final 48 hours, so nobody can sink the round at the last second");
+  a.offering.tickBudget[e.tick] -= e.budget;
+  a.offering.committed -= e.budget;
   a.offering.investors = Math.max(0, a.offering.investors - 1);
-  S.me.usdt += e.paid;
+  S.me.usdt += e.budget;
   S.me.escrow = S.me.escrow.filter((x) => x.id !== orderId);
-  toastL(L_(`已取消，$${e.paid.toFixed(2)} 原路退回`, `Cancelled; $${e.paid.toFixed(2)} returned`), "info");
+  toastL(L_(`已取消，$${e.budget.toFixed(2)} 原路退回`, `Cancelled; $${e.budget.toFixed(2)} returned`), "info");
+}
+
+/** EscrowOffering.withdrawUnfilled: the part that didn't fill comes back right after close. */
+export function withdrawUnfilled(orderId: string) {
+  const e = S.me.escrow.find((x) => x.id === orderId);
+  need(e && (e.state === "active" || e.state === "disputed"), "没有可取回的金额", "Nothing to withdraw");
+  const a = asset(e.assetId);
+  need(a.offering.clearing && a.stage !== "failed", "认购截止后才能取回未成交部分", "Unfilled money is available after the round closes");
+  const amount = e.budget - allocation(a.offering, e).cost - e.withdrawn;
+  need(amount > 0.004, "没有未成交的金额", "Nothing unfilled");
+  e.withdrawn += amount;
+  S.me.usdt += amount;
+  toastL(L_(`未成交的 $${amount.toFixed(2)} 已退回钱包`, `$${amount.toFixed(2)} unfilled returned to your wallet`), "good");
 }
 
 export function confirmReceipt(orderId: string) {
@@ -128,22 +153,50 @@ export function confirmReceipt(orderId: string) {
   need(e && e.state === "active", "这个订单不需要确认", "Nothing to confirm on this order");
   const a = asset(e.assetId);
   need(a.offering.deliveredAt, "商户尚未完成交割，资金继续托管", "The merchant hasn't delivered yet; your money stays in escrow");
+  const { shares, cost } = allocation(a.offering, e);
   confirmOrder(orderId, false);
   gainXp(30);
   badge("receipt");
   ui.emit({ type: "confetti" });
-  toastL(L_(`已确认收货：${e.shares.toFixed(2)} 份 ${a.symbol} 到账，$${e.paid.toFixed(2)} 已放款给商户`, `Confirmed: ${e.shares.toFixed(2)} ${a.symbol} shares received; $${e.paid.toFixed(2)} released to the merchant`), "good");
+  toastL(L_(`已确认收货：${shares.toFixed(2)} 份 ${a.symbol} 到账，$${cost.toFixed(2)} 已放款给商户`, `Confirmed: ${shares.toFixed(2)} ${a.symbol} shares received; $${cost.toFixed(2)} released to the merchant`), "good");
 }
 
+export function disputeBondFor(orderId: string): number {
+  const e = S.me.escrow.find((x) => x.id === orderId);
+  if (!e) return 0;
+  const a = asset(e.assetId);
+  return (allocation(a.offering, e).cost * DISPUTE_BOND_BPS) / 10_000;
+}
+
+/** EscrowOffering.dispute: freezes the order and posts a 2% bond, lost if the claim is frivolous. */
 export function dispute(orderId: string, reason: string) {
   const e = S.me.escrow.find((x) => x.id === orderId);
   need(e && e.state === "active", "这个订单不能申请仲裁", "This order can't be disputed");
   const a = asset(e.assetId);
   need(a.offering.deliveredAt, "交割前资金本来就在托管中", "Before delivery your money is already in escrow");
   need(now() < a.offering.deliveredAt + a.offering.confirmDays * DAY, "确认期已过", "The confirmation window has passed");
+  const bond = disputeBondFor(orderId);
+  need(bond > 0, "这个订单没有成交部分，不需要仲裁", "Nothing filled, nothing to dispute");
+  need(S.me.usdt >= bond, `仲裁需要押 2% 保证金 $${bond.toFixed(2)}`, `A dispute needs a 2% bond ($${bond.toFixed(2)})`);
+  S.me.usdt -= bond;
+  e.disputeBond = bond;
+  e.disputedAt = now();
   e.state = "disputed";
   e.disputeReason = reason || tr("工商登记记录与协议不符", "Registry record doesn't match the agreement");
-  notice(L_(`已提交仲裁：${a.name}。资金冻结，等待平台仲裁员处理。`, `Dispute filed for ${a.name}. Funds are frozen until an arbitrator decides.`), "warn", a.id);
+  notice(
+    L_(`已提交仲裁：${a.name}，押金 $${bond.toFixed(2)}。仲裁员 ${ARBITRATION_DAYS} 天内不处理，你可以自行全额退款。`, `Dispute filed for ${a.name} with a $${bond.toFixed(2)} bond. If no ruling within ${ARBITRATION_DAYS} days, you can refund yourself.`),
+    "warn",
+    a.id,
+  );
+}
+
+/** EscrowOffering.claimArbitrationTimeout: the platform failed to rule; the investor refunds themselves. */
+export function claimArbitrationTimeout(orderId: string) {
+  const e = S.me.escrow.find((x) => x.id === orderId);
+  need(e && e.state === "disputed", "没有进行中的仲裁", "No open dispute");
+  need(now() > (e.disputedAt ?? 0) + ARBITRATION_DAYS * DAY, `仲裁员还有时间处理（${ARBITRATION_DAYS} 天）`, `The arbitrator still has time (${ARBITRATION_DAYS} days)`);
+  const amount = refundOrder(e);
+  toastL(L_(`平台超时未裁决，$${amount.toFixed(2)}（含押金）已全额退回`, `No ruling in time: $${amount.toFixed(2)} (bond included) refunded`), "good");
 }
 
 export function refund(orderId: string) {
@@ -151,10 +204,8 @@ export function refund(orderId: string) {
   need(e && e.state === "active", "这个订单不能退款", "This order can't be refunded");
   const a = asset(e.assetId);
   need(a.stage === "failed", "只有认购失败的订单可以退款", "Only failed rounds can be refunded");
-  e.state = "refunded";
-  e.closedAt = now();
-  S.me.usdt += e.paid;
-  toastL(L_(`$${e.paid.toFixed(2)} 已全额退回`, `$${e.paid.toFixed(2)} refunded in full`), "good");
+  const amount = refundOrder(e);
+  toastL(L_(`$${amount.toFixed(2)} 已全额退回`, `$${amount.toFixed(2)} refunded in full`), "good");
 }
 
 // ------------------------------------------------------------------ trading (ShareExchange)
@@ -295,6 +346,31 @@ export function claimAll(assetId?: string) {
   return total;
 }
 
+/** ShareExchange.reinvest: claim this asset's dividends and buy more of it in one step. */
+export function reinvest(assetId: string) {
+  const a = asset(assetId);
+  need(a.stage === "trading", "这个资产还没开放交易", "This asset isn't trading yet");
+  need(claimable(S.me.positions[a.id], a.dps) >= 0.01, "暂无可复投的分红", "Nothing to reinvest yet");
+  const r = reinvestAsset(a);
+  need(r.shares > 0, "暂时没有卖单", "No sellers right now");
+  gainXp(15);
+  badge("compounder");
+  ui.emit({ type: "confetti" });
+  toastL(L_(`已用 $${r.spent.toFixed(2)} 分红复投 ${r.shares.toFixed(2)} 份 ${a.symbol}`, `Reinvested $${r.spent.toFixed(2)} into ${r.shares.toFixed(2)} ${a.symbol} shares`), "good");
+}
+
+export function setAutoReinvest(on: boolean) {
+  S.me.autoReinvest = on;
+  if (!on) return toastL(L_("已关闭自动复投，分红会留在待领取里", "Auto-reinvest off: dividends wait for you to claim"), "info");
+  const spent = autoReinvest();
+  toastL(
+    spent > 0
+      ? L_(`已开启自动复投，并把现有分红 $${spent.toFixed(2)} 复投了`, `Auto-reinvest on; $${spent.toFixed(2)} of dividends reinvested now`)
+      : L_("已开启自动复投：以后每笔分红到账就自动买入更多份额", "Auto-reinvest on: every new dividend buys more shares"),
+    "good",
+  );
+}
+
 // ------------------------------------------------------------------ confidence markets
 
 export function bet(assetId: string, period: number, side: "yes" | "no", amount: number) {
@@ -400,8 +476,8 @@ export function submitApplication(): string {
     tagline: L_(`${d.city} · 出让 ${d.companyPct}% ${instrumentZh(d.instrument)}`, `${d.city} · ${d.companyPct}% ${instrumentEn(d.instrument)}`),
     about: { zh: d.about || `${d.name} 正在申请上链。`, en: d.about || `${d.name} is applying to go on-chain.` },
     terms: L_(
-      `${d.companyPct}% ${instrumentZh(d.instrument)} · 每 ${d.periodDays} 天分红 $${d.perPeriod.toLocaleString()} · 保证金 ${d.bondPeriods} 期`,
-      `${d.companyPct}% ${instrumentEn(d.instrument)} · $${d.perPeriod.toLocaleString()} every ${d.periodDays} days · ${d.bondPeriods}-period bond`,
+      `${d.companyPct}% ${instrumentZh(d.instrument)} · 每 ${d.periodDays} 天分红 $${d.perPeriod.toLocaleString()}${d.pricing === "auction" ? " · 市场出价" : ""}`,
+      `${d.companyPct}% ${instrumentEn(d.instrument)} · $${d.perPeriod.toLocaleString()} every ${d.periodDays} days${d.pricing === "auction" ? " · market-priced" : ""}`,
     ),
     category: d.category,
     country: d.country,
@@ -414,14 +490,16 @@ export function submitApplication(): string {
     qaEndsAt: null,
     listedAt: null,
     offering: {
+      prices: d.pricing === "auction" ? ladder(1, 500, 6) : [1],
+      tickBudget: d.pricing === "auction" ? [0, 0, 0, 0, 0, 0] : [0],
+      committed: 0,
       price: 1,
       sharesForSale,
       minRaise: Math.round((d.target * d.minRaisePct) / 100),
-      sold: 0,
-      raised: 0,
       investors: 0,
       opensAt: 0,
       deadline: 0,
+      clearing: null,
       settleDeadline: null,
       agreementHash: null,
       agreementAt: null,
@@ -430,7 +508,8 @@ export function submitApplication(): string {
       deliveredAt: null,
       confirmDays: 7,
       settleDays: 30,
-      feeBps: 300,
+      upfrontBps: UPFRONT_FEE_BPS,
+      vestedBps: VESTED_FEE_BPS,
       merchantReceived: 0,
     },
     commitment: {
@@ -440,10 +519,17 @@ export function submitApplication(): string {
       numPeriods: d.numPeriods,
       graceDays: 7,
       bond: 0,
+      bondPeriods: 1,
       status: Array.from({ length: d.numPeriods }, () => "pending"),
       paid: Array.from({ length: d.numPeriods }, () => 0),
+      credit: Array.from({ length: d.numPeriods }, () => 0),
+      settled: 0,
+      feeRemaining: 0,
+      feeToPlatform: 0,
+      feeToHolders: 0,
       reliability: 1,
     },
+    router: d.instrument === "revenue_share" ? { holderBps: d.companyPct * 100, toHolders: 0, toMerchant: 0 } : null,
     audit: null,
     qa: [],
     docs: d.docs.map((x) => ({ ...x })),
@@ -515,10 +601,12 @@ export function launchRound(assetId: string, durationDays: number) {
   need(a.mine, "只能开启你自己的资产", "You can only launch your own asset");
   need(a.stage === "qa", "需要先完成 AI 尽调并进入问答期", "Finish the AI review first");
   need(unanswered(a) === 0, `还有 ${unanswered(a)} 个问题未回答`, `${unanswered(a)} question(s) still unanswered`);
-  const bond = a.commitment.perPeriod * (S.draft.bondPeriods || 1);
+  const periods = requiredBondPeriods(a.audit?.trustScore ?? 0, S.me.merchantDefaults);
+  const bond = a.commitment.perPeriod * periods;
   need(S.me.usdt >= bond, `开启认购需要先存入保证金 $${bond.toLocaleString()}，USDT 余额不足`, `Opening the round needs a $${bond.toLocaleString()} bond; not enough USDT`);
   S.me.usdt -= bond;
   a.commitment.bond = bond;
+  a.commitment.bondPeriods = periods;
   a.stage = "ipo";
   a.qaEndsAt = null;
   const t = now();
@@ -564,31 +652,54 @@ export function resolveDispute(orderId: string, refundIt: boolean) {
   need(e && e.state === "disputed", "没有这个仲裁", "No such dispute");
   const a = asset(e.assetId);
   if (refundIt) {
-    e.state = "refunded";
-    e.closedAt = now();
-    S.me.usdt += e.paid;
-    notice(L_(`仲裁结果：${a.name} 订单全额退款 $${e.paid.toFixed(2)}。`, `Arbitration: your ${a.name} order was refunded ($${e.paid.toFixed(2)}).`), "good", a.id);
+    const amount = refundOrder(e);
+    notice(L_(`仲裁结果：${a.name} 订单全额退款 $${amount.toFixed(2)}（含押金）。`, `Arbitration: your ${a.name} order was refunded ($${amount.toFixed(2)} incl. bond).`), "good", a.id);
   } else {
+    const bond = e.disputeBond ?? 0;
+    e.disputeBond = 0;
+    a.offering.merchantReceived += bond;
+    if (a.mine) S.me.usdt += bond;
     e.state = "active";
     confirmOrder(e.id, false);
-    notice(L_(`仲裁结果：${a.name} 交割有效，份额已到账，款项放给商户。`, `Arbitration: ${a.name}'s delivery stands; shares delivered and payment released.`), "info", a.id);
+    notice(L_(`仲裁结果：${a.name} 交割有效，份额已到账；押金 $${bond.toFixed(2)} 赔给商户。`, `Arbitration: ${a.name}'s delivery stands; shares delivered and your $${bond.toFixed(2)} bond goes to the merchant.`), "info", a.id);
   }
 }
 
+/** CommitmentVault.pay: pay whatever is still missing for the earliest open period. */
 export function payDividend(assetId: string, period: number) {
   const a = asset(assetId);
   const c = a.commitment;
   need(a.mine, "只能为自己的资产付款", "You can only pay your own asset");
   need(a.stage === "trading", "交割完成后才能分红", "Dividends start after delivery");
   need(c.status[period] === "pending", "这一期已结算", "This period is settled");
-  need(S.me.usdt >= c.perPeriod, "USDT 余额不足", "Not enough USDT");
-  S.me.usdt -= c.perPeriod;
-  recordPayment(a, period, now());
+  const missing = c.perPeriod - c.credit[period];
+  need(S.me.usdt >= missing, "USDT 余额不足", "Not enough USDT");
+  S.me.usdt -= missing;
+  contribute(a, missing, now());
   processLifecycle();
   gainXp(30);
   ui.emit({ type: "confetti" });
   toastL(
-    L_(`第 ${period + 1} 期分红 $${c.perPeriod.toLocaleString()} 已按持股分给全部持有人`, `Period ${period + 1}: $${c.perPeriod.toLocaleString()} split across every holder`),
+    L_(`第 ${period + 1} 期分红已补足，已按持股分给全部持有人`, `Period ${period + 1} is fully paid and split across every holder`),
+    "good",
+  );
+}
+
+/** CommitmentVault.contribute: pay any amount now (e.g. this week's takings). */
+export function contributeDividend(assetId: string, amount: number) {
+  const a = asset(assetId);
+  need(a.mine, "只能为自己的资产付款", "You can only pay your own asset");
+  need(a.stage === "trading", "交割完成后才能分红", "Dividends start after delivery");
+  need(amount >= 1, "最低 $1", "Minimum is $1");
+  need(S.me.usdt >= amount, "USDT 余额不足", "Not enough USDT");
+  S.me.usdt -= amount;
+  const done = contribute(a, amount, now());
+  processLifecycle();
+  gainXp(10);
+  toastL(
+    done
+      ? L_(`已付 $${amount.toLocaleString()}，补齐了 ${done} 期承诺`, `Paid $${amount.toLocaleString()}; ${done} period(s) now complete`)
+      : L_(`已付 $${amount.toLocaleString()}，计入本期承诺并立即分给持有人`, `Paid $${amount.toLocaleString()}; credited to this period and sent to holders now`),
     "good",
   );
 }
@@ -598,13 +709,13 @@ export function raiseCommitment(assetId: string, newAmount: number) {
   const c = a.commitment;
   need(a.mine, "只能修改自己的承诺", "You can only change your own promise");
   need(newAmount > c.perPeriod, "新承诺必须更高", "The new promise must be higher");
-  const topUp = Math.max(0, newAmount - c.bond);
+  const topUp = Math.max(0, newAmount * c.bondPeriods - c.bond);
   need(S.me.usdt >= topUp, `需要追加保证金 $${topUp.toLocaleString()}`, `Needs $${topUp.toLocaleString()} more bond`);
   S.me.usdt -= topUp;
   c.bond += topUp;
   c.perPeriod = newAmount;
   pushPrice(a, a.price * 1.04);
-  toastL(L_(`承诺已提高到每期 $${newAmount.toLocaleString()}，保证金同步追加`, `Promise raised to $${newAmount.toLocaleString()} per period; bond topped up`), "good");
+  toastL(L_(`承诺已提高到每期 $${newAmount.toLocaleString()}，保证金同步追加到 $${c.bond.toLocaleString()}`, `Promise raised to $${newAmount.toLocaleString()} per period; bond now $${c.bond.toLocaleString()}`), "good");
 }
 
 // ------------------------------------------------------------------ time & settings

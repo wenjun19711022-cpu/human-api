@@ -7,11 +7,12 @@ import {SliceHub} from "../src/SliceHub.sol";
 import {ShareToken} from "../src/ShareToken.sol";
 import {EscrowOffering} from "../src/EscrowOffering.sol";
 import {CommitmentVault} from "../src/CommitmentVault.sol";
+import {RevenueRouter} from "../src/RevenueRouter.sol";
 import {ConfidenceMarket} from "../src/ConfidenceMarket.sol";
 import {ShareExchange} from "../src/ShareExchange.sol";
 
-/// @dev Deploys the full protocol and launches one asset: 30% of a Los Angeles bar,
-///      300,000 shares at $1, promising $9,000 per quarter to holders, bonded with one quarter.
+/// @dev Deploys the full protocol and launches one asset: 30% of a Los Angeles bar, 300,000 shares at a fixed
+///      $1, promising $9,000 per quarter to holders, bonded with one quarter (AI score 86 → grade A → 1 period).
 abstract contract Base is Test {
     MockUSDT usdt;
     SliceHub hub;
@@ -31,6 +32,7 @@ abstract contract Base is Test {
     address alice = makeAddr("alice"); // Tokyo
     address bob = makeAddr("bob"); // Lagos
     address carol = makeAddr("carol"); // São Paulo
+    address distributor = makeAddr("distributor"); // pays royalties into a RevenueRouter
 
     uint256 constant PRICE = 1e6; // $1 per share
     uint256 constant FOR_SALE = 300_000e18;
@@ -49,7 +51,12 @@ abstract contract Base is Test {
         vm.startPrank(platform);
         usdt = new MockUSDT();
         hub = new SliceHub(
-            address(usdt), treasury, address(new ShareToken()), address(new EscrowOffering()), address(new CommitmentVault())
+            address(usdt),
+            treasury,
+            address(new ShareToken()),
+            address(new EscrowOffering()),
+            address(new CommitmentVault()),
+            address(new RevenueRouter())
         );
         exchange = new ShareExchange(address(hub), 50);
         confidence = new ConfidenceMarket(address(hub), 200);
@@ -58,7 +65,7 @@ abstract contract Base is Test {
         hub.setArbitrator(arbitrator, true);
         vm.stopPrank();
 
-        address[4] memory people = [merchant, alice, bob, carol];
+        address[5] memory people = [merchant, alice, bob, carol, distributor];
         for (uint256 i; i < people.length; i++) {
             usdt.mint(people[i], 1_000_000e6);
             vm.startPrank(people[i]);
@@ -68,23 +75,27 @@ abstract contract Base is Test {
             vm.stopPrank();
         }
 
-        vm.prank(merchant);
-        assetId = hub.submitAsset("ipfs://neon-coyote-bar", keccak256("docs-bundle-v1"));
-        vm.prank(verifier);
-        hub.recordAudit(assetId, 86, keccak256("ai-report"), true);
-
         firstDue = uint64(block.timestamp) + SUB + SETTLE + CONFIRM + QUARTER;
-        vm.prank(merchant);
-        (address t, address o, address v) = hub.launch(assetId, _params());
-        token = ShareToken(t);
-        offering = EscrowOffering(o);
-        vault = CommitmentVault(v);
+        (assetId, token, offering, vault,) = _list(86, _params());
+    }
 
-        address[4] memory all = [merchant, alice, bob, carol];
+    /// @dev Submit, audit with `score`, launch with `p`, and approve the new contracts for everyone.
+    function _list(uint16 score, SliceHub.LaunchParams memory p)
+        internal
+        returns (uint256 id, ShareToken t, EscrowOffering o, CommitmentVault v, RevenueRouter r)
+    {
+        vm.prank(merchant);
+        id = hub.submitAsset("ipfs://neon-coyote-bar", keccak256("docs-bundle-v1"));
+        vm.prank(verifier);
+        hub.recordAudit(id, score, keccak256("ai-report"), true);
+        vm.prank(merchant);
+        (address ta, address oa, address va, address ra) = hub.launch(id, p);
+        (t, o, v, r) = (ShareToken(ta), EscrowOffering(oa), CommitmentVault(va), RevenueRouter(ra));
+        address[5] memory all = [merchant, alice, bob, carol, distributor];
         for (uint256 i; i < all.length; i++) {
             vm.startPrank(all[i]);
-            usdt.approve(o, type(uint256).max);
-            usdt.approve(v, type(uint256).max);
+            usdt.approve(oa, type(uint256).max);
+            usdt.approve(va, type(uint256).max);
             vm.stopPrank();
         }
     }
@@ -94,7 +105,9 @@ abstract contract Base is Test {
             name: "Neon Coyote Bar 30%",
             symbol: "NCB",
             companyBps: 3000,
-            pricePerShare: PRICE,
+            floorPrice: PRICE,
+            tickBps: 0,
+            numTicks: 1,
             sharesForSale: FOR_SALE,
             minRaise: MIN_RAISE,
             subscribeDuration: SUB,
@@ -106,21 +119,31 @@ abstract contract Base is Test {
             firstDue: firstDue,
             numPeriods: 4,
             grace: GRACE,
-            bond: DIVIDEND
+            bond: DIVIDEND,
+            routerHolderBps: 0
         });
     }
 
-    /// @dev alice 200k + bob 100k, round closes, merchant signs, verifier attests.
+    function _closeRound(EscrowOffering o) internal {
+        vm.warp(o.subscribeDeadline());
+        o.close();
+    }
+
+    function _deliver(EscrowOffering o) internal {
+        vm.prank(merchant);
+        o.signAgreement(keccak256("signed-transfer-agreement.pdf"));
+        vm.prank(verifier);
+        o.attestRegistration(keccak256("ca-sos-statement-of-information"));
+    }
+
+    /// @dev alice 200k + bob 100k at the fixed price, round closes, merchant signs, verifier attests.
     function _fundAndDeliver() internal {
         vm.prank(alice);
-        offering.subscribe(200_000e6);
+        offering.bid(0, 200_000e6);
         vm.prank(bob);
-        offering.subscribe(100_000e6);
-        offering.close();
-        vm.prank(merchant);
-        offering.signAgreement(keccak256("signed-transfer-agreement.pdf"));
-        vm.prank(verifier);
-        offering.attestRegistration(keccak256("ca-sos-statement-of-information"));
+        offering.bid(0, 100_000e6);
+        _closeRound(offering);
+        _deliver(offering);
     }
 
     function _fundDeliverConfirm() internal {

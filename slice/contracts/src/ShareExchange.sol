@@ -133,6 +133,18 @@ contract ShareExchange is ReentrancyGuard {
         if (usdtIn > spent) usdt.safeTransfer(msg.sender, usdtIn - spent);
     }
 
+    /// @notice 分红复投: claim your dividends on `token` and spend them on its cheapest asks in one transaction.
+    ///         Needs the usual USDT allowance to this exchange; unspent USDT stays in your wallet.
+    function reinvest(address token, uint256 minSharesOut) external nonReentrant returns (uint256 sharesOut, uint256 spent) {
+        if (!hub.isShareToken(token)) revert UnknownToken();
+        uint256 amount = ShareToken(token).claimFor(msg.sender);
+        if (amount == 0) revert ZeroAmount();
+        usdt.safeTransferFrom(msg.sender, address(this), amount);
+        (sharesOut, spent) = _takeAsks(token, msg.sender, type(uint256).max, type(uint256).max, amount);
+        if (sharesOut < minSharesOut) revert Slippage();
+        if (amount > spent) usdt.safeTransfer(msg.sender, amount - spent);
+    }
+
     /// @notice Sell `sharesIn` into the best bids immediately; whatever cannot fill stays in your wallet.
     function marketSell(address token, uint256 sharesIn, uint256 minUsdtOut)
         external

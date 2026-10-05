@@ -120,6 +120,22 @@ contract ShareExchangeTest is Base {
         assertEq(token.lockedOf(alice), 0);
     }
 
+    function test_reinvestBuysMoreWithDividends() public {
+        vm.prank(alice);
+        exchange.placeLimit(t, false, 1e6, 10_000e18);
+        vm.warp(firstDue);
+        vm.prank(merchant);
+        vault.pay(0);
+        uint256 usdtBefore = usdt.balanceOf(bob);
+        vm.prank(bob);
+        (uint256 got, uint256 spent) = exchange.reinvest(t, 0);
+        assertApproxEqAbs(spent, 3_000e6, 3, "bob's whole dividend went back in");
+        assertApproxEqAbs(got, 2_985e18, 1e18, "minus the 0.5% taker fee");
+        assertEq(token.balanceOf(bob), 100_000e18 + got);
+        assertApproxEqAbs(usdt.balanceOf(bob), usdtBefore, 3, "wallet unchanged: claim and buy in one step");
+        assertEq(token.withdrawableDividendOf(bob), 0);
+    }
+
     function test_slippageGuard() public {
         vm.prank(alice);
         exchange.placeLimit(t, false, 2e6, 100e18);

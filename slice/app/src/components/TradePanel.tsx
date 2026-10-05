@@ -1,13 +1,29 @@
 import React from "react";
 import type { Asset } from "../engine/types";
 import { S, botBook, now } from "../engine/store";
-import { claimable, perShareDividend, sweep, yieldAt, TAKER_FEE } from "../engine/market";
-import { cancelOrder, cancelSubscription, confirmReceipt, dispute, marketBuy, marketSell, placeLimit, refund, run, subscribe } from "../engine/actions";
+import { CANCEL_CUTOFF_DAYS, allocation, claimable, perShareDividend, sweep, yieldAt, TAKER_FEE } from "../engine/market";
+import {
+  cancelOrder,
+  cancelSubscription,
+  confirmReceipt,
+  dispute,
+  disputeBondFor,
+  marketBuy,
+  marketSell,
+  placeLimit,
+  refund,
+  reinvest,
+  run,
+  subscribe,
+  withdrawUnfilled,
+} from "../engine/actions";
+import { orderView, roundView } from "../engine/view";
 import { Seg, Meter } from "./ui";
+import { Bars } from "./charts";
 import { EscrowTimeline } from "./EscrowTimeline";
 import { ILock, ISpark, IShield, IChat, IClock } from "./icons";
 import { tr } from "../lib/i18n";
-import { countdown, price as fmtPrice, shares as fmtShares, usd, pct, usdCompact } from "../lib/format";
+import { countdown, price as fmtPrice, shares as fmtShares, usd, pct, usdCompact, TIME } from "../lib/format";
 import { go } from "../lib/nav";
 
 function periodWord(days: number) {
@@ -45,38 +61,52 @@ export function TradePanel({ a, onDone }: { a: Asset; onDone?: () => void }) {
 
   return (
     <div className="card raised stack">
-      {my.map((e) => (
-        <div key={e.id} className="stack">
-          <div className="spread">
-            <h3>{tr("我的认购订单", "My subscription")}</h3>
-            <span className="pill accent">
-              <ILock /> {tr("资金托管中", "In escrow")}
-            </span>
-          </div>
-          <EscrowTimeline a={a} e={e} compact />
-          {a.offering.deliveredAt && e.state === "active" && (
-            <div className="stack tight">
-              <button className="btn primary block" onClick={() => run(() => confirmReceipt(e.id))}>
-                {tr(`确认收货 · 领取 ${fmtShares(e.shares)} 份`, `Confirm receipt · get ${fmtShares(e.shares)} shares`)}
-              </button>
-              <button className="btn quiet sm" onClick={() => run(() => dispute(e.id, ""))}>
-                {tr("登记有问题？申请仲裁", "Registry looks wrong? File a dispute")}
-              </button>
+      {my.map((e) => {
+        const v = orderView(a, e);
+        return (
+          <div key={e.id} className="stack">
+            <div className="spread">
+              <h3>{tr("我的认购订单", "My subscription")}</h3>
+              <span className="pill accent">
+                <ILock /> {tr("资金托管中", "In escrow")} {usd(v.held)}
+              </span>
             </div>
-          )}
-          {a.stage === "ipo" && (
-            <button className="btn ghost sm" onClick={() => run(() => cancelSubscription(e.id))}>
-              {tr("取消认购（全额退回）", "Cancel (full refund)")}
-            </button>
-          )}
-          {a.stage === "failed" && (
-            <button className="btn primary block" onClick={() => run(() => refund(e.id))}>
-              {tr(`退回 ${usd(e.paid)}`, `Refund ${usd(e.paid)}`)}
-            </button>
-          )}
-          <hr style={{ border: 0, borderTop: "1px solid var(--line)", margin: "4px 0", width: "100%" }} />
-        </div>
-      ))}
+            <EscrowTimeline a={a} e={e} compact />
+            {v.unfilled > 0.004 && (
+              <button className="btn ghost sm" onClick={() => run(() => withdrawUnfilled(e.id))}>
+                {tr(`取回未成交的 ${usd(v.unfilled)}`, `Withdraw ${usd(v.unfilled)} unfilled`)}
+              </button>
+            )}
+            {a.offering.deliveredAt && e.state === "active" && v.shares > 0 && (
+              <div className="stack tight">
+                <button className="btn primary block" onClick={() => run(() => confirmReceipt(e.id))}>
+                  {tr(`确认收货 · 领取 ${fmtShares(v.shares)} 份`, `Confirm receipt · get ${fmtShares(v.shares)} shares`)}
+                </button>
+                <button className="btn quiet sm" onClick={() => run(() => dispute(e.id, ""))}>
+                  {tr(`登记有问题？申请仲裁（押金 ${usd(disputeBondFor(e.id))}）`, `Registry looks wrong? Dispute (bond ${usd(disputeBondFor(e.id))})`)}
+                </button>
+              </div>
+            )}
+            {a.stage === "ipo" && (
+              <button
+                className="btn ghost sm"
+                disabled={t + CANCEL_CUTOFF_DAYS * TIME.DAY >= a.offering.deadline}
+                onClick={() => run(() => cancelSubscription(e.id))}
+              >
+                {t + CANCEL_CUTOFF_DAYS * TIME.DAY >= a.offering.deadline
+                  ? tr("截止前 48 小时不能撤单", "No cancelling in the final 48 hours")
+                  : tr("取消认购（全额退回）", "Cancel (full refund)")}
+              </button>
+            )}
+            {a.stage === "failed" && e.state === "active" && (
+              <button className="btn primary block" onClick={() => run(() => refund(e.id))}>
+                {tr(`退回 ${usd(v.held)}`, `Refund ${usd(v.held)}`)}
+              </button>
+            )}
+            <hr style={{ border: 0, borderTop: "1px solid var(--line)", margin: "4px 0", width: "100%" }} />
+          </div>
+        );
+      })}
 
       {a.stage === "ipo" && <Subscribe a={a} onDone={onDone} />}
       {a.stage === "trading" && <Trade a={a} onDone={onDone} />}
@@ -117,32 +147,97 @@ export function TradePanel({ a, onDone }: { a: Asset; onDone?: () => void }) {
   );
 }
 
-function Subscribe({ a, onDone }: { a: Asset; onDone?: () => void }) {
-  const [amt, setAmt] = React.useState("100");
+/** The order book of a launch round: committed USDT at each price on the ladder, clearing tick highlighted. */
+export function DemandLadder({ a }: { a: Asset }) {
   const o = a.offering;
+  const r = roundView(a);
+  if (o.prices.length < 2) return null;
+  return (
+    <div className="stack tight">
+      <div className="spread" style={{ fontSize: 12.5 }}>
+        <span className="muted">{tr("认购簿：每个价位上的认购金额", "Round book: USDT committed at each price")}</span>
+        <span className="pill accent">
+          {tr("预计清算价", "Clearing now")} {fmtPrice(r.clearing.price)}
+        </span>
+      </div>
+      <Bars
+        height={110}
+        values={o.tickBudget}
+        labels={o.prices.map((p) => fmtPrice(p))}
+        format={(v) => usd(v)}
+        tone={(i) => (r.clearing.atFloor || i > r.clearing.tick ? "var(--accent)" : i === r.clearing.tick && r.clearing.marginal > 0 ? "var(--gold)" : "var(--line)")}
+        hint={(i) =>
+          i > r.clearing.tick || r.clearing.atFloor
+            ? tr(`出价 ${fmtPrice(o.prices[i])} · 全额成交`, `Bid ${fmtPrice(o.prices[i])} · fills fully`)
+            : i === r.clearing.tick && r.clearing.marginal > 0
+              ? tr(`出价 ${fmtPrice(o.prices[i])} · 按比例成交 ${pct(r.clearing.marginal / o.tickBudget[i], 0)}`, `Bid ${fmtPrice(o.prices[i])} · fills ${pct(r.clearing.marginal / o.tickBudget[i], 0)} pro rata`)
+              : tr(`出价 ${fmtPrice(o.prices[i])} · 当前不成交，全额退回`, `Bid ${fmtPrice(o.prices[i])} · doesn't fill now, full refund`)
+        }
+      />
+    </div>
+  );
+}
+
+function Subscribe({ a, onDone }: { a: Asset; onDone?: () => void }) {
+  const o = a.offering;
+  const mine = S.me.escrow.find((e) => e.assetId === a.id && e.state === "active");
+  const [amt, setAmt] = React.useState("100");
+  const [tick, setTick] = React.useState(mine?.tick ?? o.prices.length - 1);
   const v = Number(amt) || 0;
-  const target = o.sharesForSale * o.price;
-  const sharesOut = Math.min(v / o.price, o.sharesForSale - o.sold);
-  const pctOfCompany = (sharesOut / o.sharesForSale) * a.companyPct;
-  const perPeriod = sharesOut * perShareDividend(a);
+  const r = roundView(a);
   const t = now();
+  // What this bid would fill if the round closed now, with the bid included.
+  const after = { ...o, tickBudget: o.tickBudget.map((b, i) => (i === tick ? b + v : b)), committed: o.committed + v };
+  const fill = allocation(after, { budget: v + (mine?.budget ?? 0), tick });
+  const myFill = mine ? allocation(o, mine) : { cost: 0, shares: 0 };
+  const newCost = fill.cost - myFill.cost;
+  const newShares = fill.shares - myFill.shares;
+  const sharePct = (newShares / o.sharesForSale) * a.companyPct;
+  const perPeriod = newShares * perShareDividend(a);
+  const clearingAfter = roundView({ ...a, offering: after }).clearing.price;
+  const status =
+    v <= 0 ? "" : newCost >= v - 0.005 ? "full" : newCost > 0.005 ? "partial" : "none";
+
   return (
     <div className="stack">
       <div className="spread">
-        <h3>{tr("首发认购", "Launch round")}</h3>
+        <h3>{r.auction ? tr("首发认购 · 你来出价", "Launch round · name your price") : tr("首发认购", "Launch round")}</h3>
         <span className="muted num" style={{ fontSize: 13 }}>
-          {tr("统一价", "Fixed price")} {fmtPrice(o.price)}
+          {r.auction ? `${fmtPrice(o.prices[0])} – ${fmtPrice(o.prices[o.prices.length - 1])}` : `${tr("统一价", "Fixed price")} ${fmtPrice(o.prices[0])}`}
         </span>
       </div>
       <div className="stack tight">
-        <Meter value={o.raised / target} />
+        <Meter value={Math.min(1, r.coverage)} />
         <div className="spread muted" style={{ fontSize: 12.5 }}>
           <span>
-            <b className="num" style={{ color: "var(--ink)" }}>{usdCompact(o.raised)}</b> / {usdCompact(target)} · {tr("最低成团", "min")} {usdCompact(o.minRaise)}
+            <b className="num" style={{ color: "var(--ink)" }}>
+              {tr(`认购 ${r.coverage.toFixed(2)} 倍`, `${r.coverage.toFixed(2)}x subscribed`)}
+            </b>{" "}
+            · {usdCompact(o.committed)} / {usdCompact(r.target)}
           </span>
           <span>{countdown(o.deadline, t)}</span>
         </div>
       </div>
+
+      {r.auction && (
+        <div className="stack tight">
+          <span className="field" style={{ gap: 4 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-2)" }}>{tr("你最高愿意出多少一份？", "The most you'd pay per share")}</span>
+          </span>
+          <div className="chips" role="radiogroup" aria-label={tr("出价", "Price")}>
+            {o.prices.map((p, i) => (
+              <button key={i} className="chip" aria-pressed={tick === i} disabled={!!mine && mine.tick !== i} onClick={() => setTick(i)}>
+                {fmtPrice(p)}
+              </button>
+            ))}
+          </div>
+          <DemandLadder a={a} />
+        </div>
+      )}
+
+      <label className="field" htmlFor={`sub-${a.id}`} style={{ gap: 4 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-2)" }}>{tr("投入多少 USDT", "How much USDT")}</span>
+      </label>
       <AmountInput id={`sub-${a.id}`} value={amt} onChange={setAmt} unit="USDT" />
       <div className="presets">
         {[10, 50, 100, 500].map((x) => (
@@ -153,18 +248,31 @@ function Subscribe({ a, onDone }: { a: Asset; onDone?: () => void }) {
       </div>
       <Quote
         rows={[
-          [tr("获得份额", "You get"), `${fmtShares(sharesOut)} ${tr("份", "shares")}`],
-          [a.instrument === "equity" ? tr("相当于公司股权", "Equal to company equity") : tr("相当于收入权益", "Share of the stream"), `${pctOfCompany.toFixed(pctOfCompany < 0.01 ? 4 : 3)}%`],
-          [tr(`预计分红（${periodWord(a.commitment.periodDays)}）`, `Dividend (${periodWord(a.commitment.periodDays)})`), usd(perPeriod), "gold"],
-          [tr("承诺年化", "Promised yield"), pct(yieldAt(a, o.price)), "gold"],
+          [tr("按现在的认购簿，预计成交", "Fills now (estimate)"), `${usd(Math.max(0, newCost))} → ${fmtShares(Math.max(0, newShares))} ${tr("份", "sh")}`],
+          [tr("预计清算价（所有人同价）", "Clearing price (same for all)"), fmtPrice(clearingAfter)],
+          [a.instrument === "equity" ? tr("相当于公司股权", "Company equity") : tr("相当于收入权益", "Share of the stream"), `${Math.max(0, sharePct).toFixed(sharePct < 0.01 ? 4 : 3)}%`],
+          [tr(`预计分红（${periodWord(a.commitment.periodDays)}）`, `Dividend (${periodWord(a.commitment.periodDays)})`), usd(Math.max(0, perPeriod)), "gold"],
+          [tr("承诺年化（按清算价）", "Promised yield at clearing"), pct(yieldAt(a, clearingAfter)), "gold"],
         ]}
       />
+      {status === "partial" && (
+        <div className="callout warn">
+          <IClock />
+          <span style={{ fontSize: 13 }}>{tr("超额认购：这个价位按比例成交，没成交的部分截止后立即退回。出价更高能优先成交，但你仍然只付统一清算价。", "Oversubscribed: this price fills pro rata and the rest comes back right after close. Bid higher to fill first; you still only pay the clearing price.")}</span>
+        </div>
+      )}
+      {status === "none" && (
+        <div className="callout warn">
+          <IClock />
+          <span style={{ fontSize: 13 }}>{tr("按现在的认购簿，这个出价低于清算价，不会成交（截止后全额退回）。", "At the current book this bid is below the clearing price and won't fill (fully refunded after close).")}</span>
+        </div>
+      )}
       <div className="callout">
         <IShield />
         <span style={{ fontSize: 13 }}>
           {tr(
-            "USDT 锁在托管合约里，平台和商户都动不了。成团 → 商户签约并完成工商变更 → 你确认收货，钱才放给商户。没成团或商户没交割，全额退回。",
-            "Your USDT is locked in an escrow contract that neither the platform nor the merchant can touch. Round fills → merchant signs and registers the transfer → you confirm receipt, and only then is the merchant paid. If not, you get every cent back.",
+            "所有人按同一个清算价成交，出价高只是排在前面，不会多付；超额认购按比例分配，不拼手速。USDT 锁在托管合约里：成团 → 商户签约并完成工商变更 → 你确认收货，才放款给商户。",
+            "Everyone pays one clearing price: bidding higher only puts you first, it never costs more. Oversubscription is pro rata, not first come. Your USDT waits in escrow until the round fills, the merchant registers the transfer and you confirm receipt.",
           )}
         </span>
       </div>
@@ -172,10 +280,10 @@ function Subscribe({ a, onDone }: { a: Asset; onDone?: () => void }) {
         className="btn primary lg block"
         disabled={!v || v > S.me.usdt}
         onClick={() => {
-          if (run(() => subscribe(a.id, v))) onDone?.();
+          if (run(() => subscribe(a.id, tick, v))) onDone?.();
         }}
       >
-        {v > S.me.usdt ? tr("USDT 余额不足", "Not enough USDT") : tr(`认购 ${usd(v)}`, `Subscribe ${usd(v)}`)}
+        {v > S.me.usdt ? tr("USDT 余额不足", "Not enough USDT") : r.auction ? tr(`以最高 ${fmtPrice(o.prices[tick])} 出价 ${usd(v)}`, `Bid ${usd(v)} up to ${fmtPrice(o.prices[tick])}`) : tr(`认购 ${usd(v)}`, `Subscribe ${usd(v)}`)}
       </button>
       {v > S.me.usdt && (
         <button className="btn quiet sm" onClick={() => go("me")}>
@@ -333,6 +441,11 @@ function Trade({ a, onDone }: { a: Asset; onDone?: () => void }) {
             </span>
           </div>
         </div>
+      )}
+      {p && claimable(p, a.dps) >= 0.01 && (
+        <button className="btn ghost sm" onClick={() => run(() => reinvest(a.id))}>
+          {tr(`分红复投：用 ${usd(claimable(p, a.dps))} 买入更多`, `Reinvest ${usd(claimable(p, a.dps))} into more shares`)}
+        </button>
       )}
 
       {myOrders.length > 0 && (

@@ -1,12 +1,13 @@
 import React from "react";
 import type { EscrowOrder } from "../engine/types";
-import { S, useWorld } from "../engine/store";
-import { cancelOrder, cancelSubscription, confirmReceipt, dispute, refund, run } from "../engine/actions";
+import { S, now, useWorld } from "../engine/store";
+import { cancelOrder, cancelSubscription, claimArbitrationTimeout, confirmReceipt, dispute, disputeBondFor, refund, run, withdrawUnfilled } from "../engine/actions";
+import { orderView } from "../engine/view";
 import { EscrowTimeline } from "../components/EscrowTimeline";
 import { Empty, StagePill, Tabs, Tile } from "../components/ui";
 import { IReceipt, ILock } from "../components/icons";
 import { tr } from "../lib/i18n";
-import { dateTime, price as fmtPrice, shares as fmtShares, usd } from "../lib/format";
+import { dateTime, price as fmtPrice, shares as fmtShares, usd, TIME } from "../lib/format";
 import { go } from "../lib/nav";
 
 type F = "all" | "waiting" | "settling" | "confirm" | "done" | "refund";
@@ -58,6 +59,7 @@ export function Orders() {
         {list.map((e) => {
           const a = S.assets.find((x) => x.id === e.assetId)!;
           const b = bucket(e);
+          const v = orderView(a, e);
           return (
             <div key={e.id} className="card stack">
               <div className="row" style={{ gap: 12 }}>
@@ -65,13 +67,18 @@ export function Orders() {
                 <button className="grow stack tight" style={{ gap: 2, border: 0, background: "none", padding: 0, textAlign: "left" }} onClick={() => go(`asset-${a.id}`)}>
                   <b>{a.name}</b>
                   <span className="muted" style={{ fontSize: 12.5 }}>
-                    {usd(e.paid, 2)} · {fmtShares(e.shares)} {tr("份", "shares")}
+                    {tr("出价", "Bid")} {usd(e.budget, 2)} · {v.closed ? tr("成交", "filled") : tr("预计成交", "est. fill")} {usd(v.cost, 2)} → {fmtShares(v.shares)} {tr("份", "sh")}
                   </span>
                 </button>
                 <StagePill a={a} />
               </div>
               <EscrowTimeline a={a} e={e} />
-              {b === "confirm" && e.state === "active" && (
+              {v.unfilled > 0.004 && (
+                <button className="btn ghost sm" onClick={() => run(() => withdrawUnfilled(e.id))}>
+                  {tr(`取回未成交的 ${usd(v.unfilled, 2)}`, `Withdraw ${usd(v.unfilled, 2)} unfilled`)}
+                </button>
+              )}
+              {b === "confirm" && e.state === "active" && v.shares > 0 && (
                 <div className="stack tight">
                   <button className="btn primary block" onClick={() => run(() => confirmReceipt(e.id))}>
                     {tr("确认收货，放款给商户", "Confirm receipt and release payment")}
@@ -86,7 +93,7 @@ export function Orders() {
                       onChange={(ev) => setReason({ ...reason, [e.id]: ev.target.value })}
                     />
                     <button className="btn sm ghost" onClick={() => run(() => dispute(e.id, reason[e.id] ?? ""))}>
-                      {tr("申请仲裁", "Dispute")}
+                      {tr(`申请仲裁 · 押 ${usd(disputeBondFor(e.id), 2)}`, `Dispute · ${usd(disputeBondFor(e.id), 2)} bond`)}
                     </button>
                   </div>
                 </div>
@@ -98,13 +105,25 @@ export function Orders() {
               )}
               {a.stage === "failed" && e.state === "active" && (
                 <button className="btn primary block" onClick={() => run(() => refund(e.id))}>
-                  {tr(`退款 ${usd(e.paid, 2)}`, `Refund ${usd(e.paid, 2)}`)}
+                  {tr(`退款 ${usd(v.held, 2)}`, `Refund ${usd(v.held, 2)}`)}
                 </button>
               )}
               {e.state === "disputed" && (
                 <div className="callout warn">
                   <ILock />
-                  <span>{tr("资金冻结中，等待仲裁员处理（可在「我的 → 平台审核台」演示仲裁）。", "Funds are frozen pending arbitration (try it under Me → Verifier desk).")}</span>
+                  <div className="stack tight grow">
+                    <span>
+                      {tr(
+                        `资金冻结，押金 ${usd(e.disputeBond ?? 0, 2)}：赢了全额退回，输了归商户。仲裁员 14 天内不处理，你可以自行全额退款（可在「审核台」演示仲裁）。`,
+                        `Funds frozen with a ${usd(e.disputeBond ?? 0, 2)} bond: back to you if you're right, to the merchant if not. If no ruling within 14 days you can refund yourself (try it at the Verifier desk).`,
+                      )}
+                    </span>
+                    {now() > (e.disputedAt ?? now()) + 14 * TIME.DAY && (
+                      <button className="btn sm primary" onClick={() => run(() => claimArbitrationTimeout(e.id))}>
+                        {tr("平台超时未裁决：自行全额退款", "No ruling in time: refund myself")}
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

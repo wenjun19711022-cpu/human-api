@@ -27,15 +27,26 @@ export interface Person {
   country: string; // ISO-3166 alpha-2
 }
 
+/** Result of the uniform-price batch auction (EscrowOffering.previewClearing / close). */
+export interface Clearing {
+  tick: number;
+  price: number;
+  atFloor: boolean; // demand never covered supply: everyone fills at the floor
+  marginal: number; // USDT the clearing tick spends in total
+  raised: number;
+}
+
 export interface Offering {
-  price: number; // USDT per share
+  prices: number[]; // price ladder, prices[0] = floor; one price = fixed-price round
+  tickBudget: number[]; // USDT committed at each tick
+  committed: number; // sum of tickBudget
+  price: number; // floor before close, clearing price after
   sharesForSale: number;
   minRaise: number;
-  sold: number;
-  raised: number;
   investors: number;
   opensAt: number;
   deadline: number;
+  clearing: Clearing | null; // set at close
   settleDeadline: number | null;
   agreementHash: string | null;
   agreementAt: number | null;
@@ -44,7 +55,8 @@ export interface Offering {
   deliveredAt: number | null;
   confirmDays: number;
   settleDays: number;
-  feeBps: number;
+  upfrontBps: number; // platform fee taken at release
+  vestedBps: number; // platform fee parked in the vault, earned only by on-time periods
   merchantReceived: number;
 }
 
@@ -55,8 +67,14 @@ export interface Commitment {
   numPeriods: number;
   graceDays: number;
   bond: number;
+  bondPeriods: number; // required bond multiple, priced from the AI score + default history
   status: PeriodStatus[];
-  paid: number[];
+  paid: number[]; // what holders got for each settled period (credit + slashed bond)
+  credit: number[]; // installments credited toward each period
+  settled: number;
+  feeRemaining: number; // vested platform fee still in the vault
+  feeToPlatform: number;
+  feeToHolders: number;
   /** Simulation only: chance a bot-run merchant pays each period on time. */
   reliability: number;
 }
@@ -167,6 +185,7 @@ export interface Asset {
   margin: number;
   volume24h: number;
   markets: ConfMarket[];
+  router: { holderBps: number; toHolders: number; toMerchant: number } | null; // 收入直连
   mine?: boolean;
   demand: number; // simulation: how fast bots subscribe / buy
 }
@@ -182,13 +201,16 @@ export interface Position {
 export interface EscrowOrder {
   id: string;
   assetId: string;
-  paid: number;
-  shares: number;
+  budget: number; // USDT escrowed
+  tick: number; // highest acceptable price = offering.prices[tick]
+  withdrawn: number; // unfilled part already returned
   state: "active" | "confirmed" | "disputed" | "refunded";
   at: number;
   closedAt?: number;
   auto?: boolean;
   disputeReason?: string;
+  disputeBond?: number;
+  disputedAt?: number;
 }
 
 export interface OpenOrder {
@@ -270,6 +292,18 @@ export interface Me {
   faucetAt: number;
   welcomed: boolean;
   granted?: boolean;
+  autoReinvest: boolean;
+  reinvested: number;
+  merchantDefaults: number;
+}
+
+/** Another investor, tracked so the leaderboards rank what people actually did. Positions mirror ShareToken. */
+export interface Rival {
+  name: string;
+  country: string;
+  positions: Record<string, Position>;
+  bets: { assetId: string; period: number; side: "yes" | "no"; amount: number }[];
+  oracle: { n: number; hits: number; pnl: number }; // settled confidence-market record
 }
 
 export interface Draft {
@@ -296,7 +330,7 @@ export interface Draft {
   perPeriod: number;
   periodDays: number;
   numPeriods: number;
-  bondPeriods: number;
+  pricing: "fixed" | "auction";
 }
 
 export interface State {
@@ -308,6 +342,7 @@ export interface State {
   route: string;
   assets: Asset[];
   me: Me;
+  rivals: Rival[];
   feed: FeedItem[];
   notices: Notice[];
   draft: Draft;

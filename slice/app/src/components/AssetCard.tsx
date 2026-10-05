@@ -8,6 +8,7 @@ import { change, yieldAt, yesPrice } from "../engine/market";
 import { now } from "../engine/store";
 import { go } from "../lib/nav";
 import { liveMarket } from "../engine/ops";
+import { roundView } from "../engine/view";
 import { IChat, IClock, ISpark } from "./icons";
 import { S } from "../engine/store";
 
@@ -15,7 +16,8 @@ export function AssetCard({ a }: { a: Asset }) {
   const t = now();
   const ch = change(a.history.concat(a.intraday), t, 86_400_000, a.price);
   const m = liveMarket(a);
-  const y = yieldAt(a, a.stage === "trading" ? a.price : a.offering.price);
+  const rv = roundView(a);
+  const y = yieldAt(a, a.stage === "trading" ? a.price : rv.clearing.price);
   const open = a.qa.filter((q) => !q.answer).length;
   return (
     <button className="acard" onClick={() => go(`asset-${a.id}`)} aria-label={a.name}>
@@ -48,15 +50,22 @@ export function AssetCard({ a }: { a: Asset }) {
         <div className="stack tight">
           <div className="spread" style={{ fontSize: 13 }}>
             <span>
-              <b className="num">{pct(a.offering.raised / (a.offering.sharesForSale * a.offering.price), 0)}</b> <span className="muted">{tr("已认购", "subscribed")}</span>
+              <b className="num">{tr(`${rv.coverage.toFixed(2)} 倍`, `${rv.coverage.toFixed(2)}x`)}</b> <span className="muted">{tr("认购", "subscribed")}</span>
+              {rv.auction && (
+                <>
+                  {" "}
+                  · <span className="muted">{tr("预计清算", "clearing")}</span> <b className="num">{fmtPrice(rv.clearing.price)}</b>
+                </>
+              )}
             </span>
             <span className="row muted" style={{ gap: 4 }}>
               <IClock size={14} /> {countdown(a.offering.deadline, t)}
             </span>
           </div>
-          <Meter value={a.offering.raised / (a.offering.sharesForSale * a.offering.price)} />
+          <Meter value={Math.min(1, rv.coverage)} />
           <div className="muted" style={{ fontSize: 12.5 }}>
-            {usdCompact(a.offering.raised)} / {usdCompact(a.offering.sharesForSale * a.offering.price)} · {a.offering.investors.toLocaleString()} {tr("人", "investors")}
+            {usdCompact(a.offering.committed)} / {usdCompact(rv.target)} · {a.offering.investors.toLocaleString()} {tr("人", "investors")}
+            {rv.auction ? tr(" · 你来出价", " · name your price") : ""}
           </div>
         </div>
       )}
@@ -99,6 +108,7 @@ export function AssetCard({ a }: { a: Asset }) {
       <div className="row wrap" style={{ gap: 6 }}>
         <StagePill a={a} />
         {a.stage !== "review" && <span className="pill gold">{tr(`承诺年化 ${pct(y, 1)}`, `${pct(y, 1)} promised yield`)}</span>}
+        {a.router && <span className="pill accent" title={tr("付款方直接把钱打进合约，按比例分给持有人", "The payer sends revenue straight into the contract, split to holders automatically")}>{tr("收入直连", "Direct revenue")}</span>}
         {m && (
           <span className="pill" title={tr("信心市场：下一期能否按时分红", "Confidence market: will the next payout arrive on time")}>
             {tr("信心", "Confidence")} <b className={yesPrice(m) >= 0.6 ? "up" : yesPrice(m) >= 0.4 ? "" : "down"}>{Math.round(yesPrice(m) * 100)}%</b>

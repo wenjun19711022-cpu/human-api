@@ -5,7 +5,8 @@ import {Base} from "./Base.t.sol";
 
 /// @notice The whole story in one test: a bar in Los Angeles sells 30% to strangers in Tokyo, Lagos and
 ///         São Paulo; they get paid every quarter; one of them sells on the open market; when the bar finally
-///         misses a payment, its bond pays holders and the confidence market settles NO by itself.
+///         misses a payment, its bond pays holders, the platform forfeits that quarter's fee, and the confidence
+///         market settles NO by itself.
 contract LifecycleTest is Base {
     function test_fullStory() public {
         // 1. Round: escrowed USDT, merchant delivers, buyers confirm receipt.
@@ -16,12 +17,12 @@ contract LifecycleTest is Base {
         offering.autoConfirm(bob);
         assertEq(token.totalSupply(), FOR_SALE);
 
-        // 2. Market makes a call on the first payout.
+        // 2. The crowd prices the first payout.
         uint256 q0 = confidence.createMarket(address(vault), 0);
         vm.prank(carol);
         confidence.bet(q0, true, 1_000e6);
 
-        // 3. Quarter 1 paid on time.
+        // 3. Quarter 1 paid on time; the platform earns its first fee slice.
         vm.warp(firstDue);
         vm.prank(merchant);
         vault.pay(0);
@@ -49,11 +50,12 @@ contract LifecycleTest is Base {
         vm.prank(bob);
         assertEq(confidence.claim(q1), 990e6);
 
-        // Every holder still received both quarters: one paid, one from the slashed bond.
-        assertApproxEqAbs(token.withdrawableDividendOf(alice), 6_000e6 + 4_500e6, 1);
-        assertApproxEqAbs(token.withdrawableDividendOf(bob), 3_000e6 + 3_000e6, 1);
-        assertApproxEqAbs(token.withdrawableDividendOf(carol), 1_500e6, 1);
+        // Quarter 2 for holders = 9,000 bond + 1,500 fee slice the platform forfeited = 10,500 (3.5c a share).
+        assertApproxEqAbs(token.withdrawableDividendOf(alice), 6_000e6 + 5_250e6, 2);
+        assertApproxEqAbs(token.withdrawableDividendOf(bob), 3_000e6 + 3_500e6, 2);
+        assertApproxEqAbs(token.withdrawableDividendOf(carol), 1_750e6, 2);
         assertEq(vault.defaults(), 1);
         assertEq(vault.paidOnTime(), 1);
+        assertEq(hub.merchantDefaults(merchant), 1);
     }
 }

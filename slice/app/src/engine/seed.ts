@@ -18,6 +18,7 @@ import type {
   PeriodStatus,
   Person,
   Question,
+  Rival,
   Severity,
   Stage,
   State,
@@ -25,7 +26,7 @@ import type {
 import { AI_AGENT, PEOPLE } from "./geo";
 import { fakeHash, hashString, mulberry32 } from "../lib/rand";
 import { TIME } from "../lib/format";
-import { emptyPosition, moveShares } from "./market";
+import { UPFRONT_FEE_BPS, VESTED_FEE_BPS, claimable, clear, emptyPosition, ladder, moveShares, requiredBondPeriods } from "./market";
 
 const DAY = TIME.DAY;
 const HOUR = TIME.HOUR;
@@ -62,6 +63,9 @@ interface Spec {
   price: number;
   sharesForSale: number;
   raisedPct?: number;
+  ticks?: number; // price ladder steps (auction); omit for fixed price
+  tickBps?: number;
+  tickBudgets?: number[]; // committed USDT per tick for live rounds
   investors: number;
   ipoDeadlineIn?: number;
   qaEndsIn?: number;
@@ -281,22 +285,46 @@ function buildAsset(s: Spec, now: number): Asset {
 
   const trading = s.stage === "trading";
   const settling = s.stage === "settling";
-  const raised =
-    trading || settling ? s.sharesForSale * s.ipoPrice : s.stage === "ipo" ? Math.round(s.sharesForSale * s.ipoPrice * (s.raisedPct ?? 0)) : 0;
+
+  // Price ladder and committed demand. Settled rounds are recorded as exactly filled at the launch price.
+  const prices = s.ticks ? ladder(s.ipoPrice, s.tickBps ?? 500, s.ticks) : [s.ipoPrice];
+  let tickBudget = prices.map(() => 0);
+  if (trading || settling) tickBudget = [s.sharesForSale * s.ipoPrice, ...prices.slice(1).map(() => 0)];
+  else if (s.stage === "ipo") tickBudget = s.tickBudgets ?? [Math.round(s.sharesForSale * s.ipoPrice * (s.raisedPct ?? 0))];
+  const committed = tickBudget.reduce((x, y) => x + y, 0);
+  const clearing = trading || settling ? clear(prices, tickBudget, s.sharesForSale) : null;
+  const raised = clearing ? clearing.raised : 0;
   const totalShares = trading ? s.sharesForSale : 0;
 
+  // Bond priced from the AI score; past periods settle the vested fee one slice at a time.
+  const score = s.score ? s.score.reduce((x, y) => x + y, 0) : 70;
+  const bondPeriods = requiredBondPeriods(score, 0);
   const status: PeriodStatus[] = Array.from({ length: s.numPeriods }, (_, i) => past[i] ?? "pending");
-  let bond = s.perPeriod;
+  let bond = s.perPeriod * bondPeriods;
+  const vestedTotal = trading ? (raised * VESTED_FEE_BPS) / 10_000 : 0;
+  const slice = vestedTotal / s.numPeriods;
+  let feeToPlatform = 0;
+  let feeToHolders = 0;
   const paid = status.map((st) => {
-    if (st === "paid" || st === "late") return s.perPeriod;
+    if (st === "pending") return 0;
+    if (st === "paid") feeToPlatform += slice;
+    else feeToHolders += slice;
     if (st === "defaulted") {
       const slashed = Math.min(bond, s.perPeriod);
       bond -= slashed;
       return slashed;
     }
-    return 0;
+    return s.perPeriod;
   });
-  const distributed = paid.reduce((a, b) => a + b, 0);
+  const credit = paid.slice();
+  const next = status.indexOf("pending");
+  // Revenue routers have been filling the current period since the last due date.
+  if (trading && s.instrument === "revenue_share" && next !== -1) {
+    const elapsed = 1 - Math.min(1, (s.nextDueIn ?? 30) / s.periodDays);
+    credit[next] = Math.round(s.perPeriod * elapsed * (s.reliability > 0.9 ? 1.08 : 0.8));
+  }
+  const settled = status.filter((x) => x !== "pending").length;
+  const distributed = paid.reduce((a, b) => a + b, 0) + feeToHolders + (next !== -1 ? credit[next] : 0);
 
   const { history, intraday } = trading
     ? buildHistory(s, listedAt!, now, r)
@@ -325,14 +353,16 @@ function buildAsset(s: Spec, now: number): Asset {
     qaEndsAt,
     listedAt,
     offering: {
-      price: s.ipoPrice,
+      prices,
+      tickBudget,
+      committed,
+      price: clearing ? clearing.price : s.ipoPrice,
       sharesForSale: s.sharesForSale,
       minRaise,
-      sold: raised / s.ipoPrice,
-      raised,
       investors: s.investors,
       opensAt,
       deadline,
+      clearing,
       settleDeadline,
       agreementHash: trading || settling ? fakeHash(s.symbol + "agreement") : null,
       agreementAt: trading || settling ? (settleDeadline ?? now) - 26 * DAY : null,
@@ -341,8 +371,9 @@ function buildAsset(s: Spec, now: number): Asset {
       deliveredAt,
       confirmDays,
       settleDays,
-      feeBps: 300,
-      merchantReceived: trading ? raised * 0.97 : 0,
+      upfrontBps: UPFRONT_FEE_BPS,
+      vestedBps: VESTED_FEE_BPS,
+      merchantReceived: trading ? raised * (1 - (UPFRONT_FEE_BPS + VESTED_FEE_BPS) / 10_000) : 0,
     },
     commitment: {
       perPeriod: s.perPeriod,
@@ -351,10 +382,17 @@ function buildAsset(s: Spec, now: number): Asset {
       numPeriods: s.numPeriods,
       graceDays,
       bond,
+      bondPeriods,
       status,
       paid,
+      credit,
+      settled,
+      feeRemaining: vestedTotal - settled * slice,
+      feeToPlatform,
+      feeToHolders,
       reliability: s.reliability,
     },
+    router: s.instrument === "revenue_share" ? { holderBps: s.companyPct * 100, toHolders: distributed, toMerchant: (distributed * (100 - s.companyPct)) / s.companyPct } : null,
     audit: buildAudit(s, now),
     qa: buildQA(s, now),
     docs: buildDocs(s, now),
@@ -374,7 +412,6 @@ function buildAsset(s: Spec, now: number): Asset {
 
   // A confidence market on the next payout of every live commitment.
   if (trading || s.stage === "ipo" || settling) {
-    const next = status.indexOf("pending");
     if (next !== -1) {
       const pool = 800 + r() * 6000;
       const belief = Math.min(0.97, Math.max(0.08, s.reliability + (r() - 0.5) * 0.08));
@@ -411,7 +448,9 @@ const SPECS: Spec[] = [
     ipoPrice: 1,
     price: 1,
     sharesForSale: 300_000,
-    raisedPct: 0.62,
+    ticks: 6, // investors name their price: $1.00 → $1.28 in +5% steps
+    tickBps: 500,
+    tickBudgets: [60_000, 150_000, 95_000, 60_000, 20_000, 10_000],
     investors: 412,
     ipoDeadlineIn: 5,
     perPeriod: 9_000,
@@ -839,6 +878,8 @@ const SPECS: Spec[] = [
   },
   {
     symbol: "ROAST",
+    ticks: 5,
+    tickBps: 500,
     name: "Southbank Roasters",
     tagline: L_("墨尔本精品咖啡烘焙 + 两家门店，出让 25% 股权", "Melbourne specialty roaster with two cafés — 25% equity"),
     about: L_(
@@ -1262,7 +1303,7 @@ export function defaultDraft(): Draft {
     perPeriod: 6_000,
     periodDays: 91,
     numPeriods: 8,
-    bondPeriods: 1,
+    pricing: "auction",
   };
 }
 
@@ -1283,6 +1324,9 @@ function demoWallet(assets: Asset[], now: number): Me {
     merchantAssetId: null,
     faucetAt: 0,
     welcomed: false,
+    autoReinvest: false,
+    reinvested: 0,
+    merchantDefaults: 0,
   };
   const find = (id: string) => assets.find((a) => a.id === id)!;
 
@@ -1300,9 +1344,12 @@ function demoWallet(assets: Asset[], now: number): Me {
   give("kaze", 300, 510, kaze.dps - 7_200 / kaze.totalShares);
 
   // An escrow order in a round that has been delivered: ready for 确认收货.
-  me.escrow.push({ id: "e-volt", assetId: "volt", paid: 500, shares: 500, state: "active", at: now - 30 * DAY });
-  // A live subscription in the Neon Coyote round.
-  me.escrow.push({ id: "e-ncb", assetId: "ncb", paid: 300, shares: 300, state: "active", at: now - 2 * DAY });
+  me.escrow.push({ id: "e-volt", assetId: "volt", budget: 500, tick: 0, withdrawn: 0, state: "active", at: now - 30 * DAY });
+  // A live bid in the Neon Coyote auction, at the top of the ladder (still pays the clearing price).
+  const ncb = find("ncb");
+  me.escrow.push({ id: "e-ncb", assetId: "ncb", budget: 300, tick: ncb.offering.prices.length - 1, withdrawn: 0, state: "active", at: now - 2 * DAY });
+  ncb.offering.tickBudget[ncb.offering.prices.length - 1] += 300;
+  ncb.offering.committed += 300;
   const kazeMarket = kaze.markets[0];
   if (kazeMarket) {
     kazeMarket.myYes = 40;
@@ -1310,6 +1357,36 @@ function demoWallet(assets: Asset[], now: number): Me {
     me.bets.push({ id: "b-kaze", assetId: "kaze", period: kazeMarket.period, side: "yes", amount: 40, at: now - 5 * DAY });
   }
   return me;
+}
+
+/** The other investors on the leaderboards: holdings bought at different times, and a confidence-market record. */
+function seedRivals(assets: Asset[]): Rival[] {
+  const r = mulberry32(hashString("rivals"));
+  const trading = assets.filter((a) => a.stage === "trading");
+  return PEOPLE.map((p) => {
+    const skill = r();
+    const rival: Rival = { name: p.name, country: p.country, positions: {}, bets: [], oracle: { n: 0, hits: 0, pnl: 0 } };
+    const picks = 1 + Math.floor(r() * 3);
+    for (let k = 0; k < picks; k++) {
+      const a = trading[Math.floor(r() * trading.length)];
+      if (rival.positions[a.id]) continue;
+      const pos = emptyPosition();
+      const qty = Math.round(a.totalShares * (0.003 + r() * 0.03));
+      moveShares(pos, qty, a.dps * r() * 0.7); // bought partway through the payout history
+      pos.cost = qty * a.price * (0.8 + r() * 0.3);
+      pos.withdrawn = claimable(pos, a.dps) * (0.4 + r() * 0.6);
+      rival.positions[a.id] = pos;
+    }
+    const calls = Math.floor(r() * 15);
+    for (let k = 0; k < calls; k++) {
+      const stake = 20 + r() * 230;
+      const hit = r() < 0.3 + skill * 0.4;
+      rival.oracle.n += 1;
+      if (hit) rival.oracle.hits += 1;
+      rival.oracle.pnl += hit ? stake * (0.2 + r() * 1.1) : -stake;
+    }
+    return rival;
+  });
 }
 
 export function createWorld(now = Date.now()): State {
@@ -1322,7 +1399,7 @@ export function createWorld(now = Date.now()): State {
   volt.offering.deliveredAt = now - 2 * DAY;
 
   const state: State = {
-    v: 3,
+    v: 5,
     offset: 0,
     lastDay: Math.floor(now / DAY),
     lang: "zh",
@@ -1330,6 +1407,7 @@ export function createWorld(now = Date.now()): State {
     route: "market",
     assets,
     me: demoWallet(assets, now),
+    rivals: seedRivals(assets),
     feed: [],
     notices: [
       {

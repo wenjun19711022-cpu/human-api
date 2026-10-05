@@ -198,6 +198,14 @@ export function Seg<T extends string>({ value, onChange, items, className }: { v
   );
 }
 
+export function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} aria-label={label} className="switch" onClick={() => onChange(!on)}>
+      <span />
+    </button>
+  );
+}
+
 export function Empty({ icon, title, children }: { icon: React.ReactNode; title: string; children?: React.ReactNode }) {
   return (
     <div className="empty">

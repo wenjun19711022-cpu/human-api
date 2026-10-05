@@ -5,25 +5,28 @@
 import type { Asset, L } from "./types";
 import { S, botBook, commit, getAsset, nextId, now, refreshBook } from "./store";
 import {
+  addBid,
   badge,
   closeRound,
   confirmOrder,
+  contribute,
   deliver,
   failRound,
   feed,
   gainXp,
-  myEscrowPaid,
+  holdsAsset,
+  myEscrowCost,
   notice,
   openRound,
   payMerchant,
   pushPrice,
-  recordPayment,
+  reinvestAsset,
   resolveMarkets,
   slashPeriod,
   botWillPay,
 } from "./ops";
 import { PEOPLE } from "./geo";
-import { dueDate, moveShares, sweep, yieldAt } from "./market";
+import { dueDate, moveShares, nextPending, sweep, yieldAt } from "./market";
 import { between, fakeHash, pick, rng } from "../lib/rand";
 import { TIME } from "../lib/format";
 
@@ -40,7 +43,8 @@ export function processLifecycle(t = now()) {
 
     if (a.stage === "qa" && !a.mine && a.qaEndsAt && t >= a.qaEndsAt) openRound(a, t);
 
-    if (a.stage === "ipo" && (o.sold >= o.sharesForSale - 1e-6 || t >= o.deadline)) closeRound(a, t);
+    // Rounds always run to the deadline: oversubscription is allocated pro rata, not first come.
+    if (a.stage === "ipo" && t >= o.deadline) closeRound(a);
 
     if (a.stage === "settling") {
       const since = o.deadline;
@@ -62,29 +66,29 @@ export function processLifecycle(t = now()) {
 
     if (o.deliveredAt) {
       // Auto-confirm (EscrowOffering.autoConfirm) after the confirm window.
-      const autoAt = o.deliveredAt + o.confirmDays * DAY;
-      if (t >= autoAt) {
+      if (t >= o.deliveredAt + o.confirmDays * DAY) {
         for (const e of S.me.escrow) {
           if (e.assetId === a.id && e.state === "active") {
             confirmOrder(e.id, true);
-            notice(L_(`${a.name} 已自动确认收货，${e.shares.toFixed(2)} 份已到你的钱包。`, `${a.name} auto-confirmed: ${e.shares.toFixed(2)} shares are in your wallet.`), "good", a.id);
+            notice(L_(`${a.name} 已自动确认收货，份额已到你的钱包。`, `${a.name} auto-confirmed: your shares are in your wallet.`), "good", a.id);
           }
         }
-        if (a.mine) {
-          const pending = o.raised - myEscrowPaid(a.id) - o.merchantReceived / (1 - o.feeBps / 10_000);
+        if (a.mine && o.clearing) {
+          const releasedGross = o.merchantReceived / (1 - (o.upfrontBps + o.vestedBps) / 10_000);
+          const pending = o.clearing.raised - myEscrowCost(a.id) - releasedGross;
           if (pending > 1) {
-            payMerchant(a, pending);
-            notice(L_(`剩余投资款 $${Math.round(pending * 0.97).toLocaleString()} 已自动确认并到账。`, `The remaining $${Math.round(pending * 0.97).toLocaleString()} auto-confirmed and arrived.`), "good", a.id);
+            const net = payMerchant(a, pending);
+            notice(L_(`剩余投资款已自动确认，$${Math.round(net).toLocaleString()} 到账。`, `The remaining investors auto-confirmed; $${Math.round(net).toLocaleString()} arrived.`), "good", a.id);
           }
         }
       }
 
-      // Dividend periods.
+      // Dividend periods: routers and installments credit continuously (dailyStep); here we settle due dates.
       for (let i = 0; i < c.numPeriods; i++) {
         if (c.status[i] !== "pending") continue;
         const due = dueDate(c, i);
         if (t < due) break;
-        if (!a.mine && botWillPay(a, i)) recordPayment(a, i, due);
+        if (!a.mine && !a.router && botWillPay(a, i)) contribute(a, c.perPeriod - c.credit[i], due);
         else if (t > due + c.graceDays * DAY) slashPeriod(a, i, t);
         else break;
       }
@@ -104,6 +108,39 @@ function fairPrice(a: Asset): number {
   return a.price * Math.pow(yieldAt(a) / target, 0.08);
 }
 
+/** Pick a tick on the price ladder: most bots bid near the floor, a few chase at the top. */
+function botPriceTick(n: number): number {
+  if (n <= 1) return 0;
+  const weights = Array.from({ length: n }, (_, k) => n - k + 0.5);
+  let r = rng() * weights.reduce((x, y) => x + y, 0);
+  for (let k = 0; k < n; k++) {
+    r -= weights[k];
+    if (r <= 0) return k;
+  }
+  return n - 1;
+}
+
+/** Daily revenue through a RevenueRouter: the holders' share goes straight into the vault. */
+function routerDay(a: Asset, t: number) {
+  const c = a.commitment;
+  const i = nextPending(c);
+  if (!a.router || a.stage !== "trading" || a.totalShares <= 0 || i >= c.numPeriods) return;
+  let toHolders: number;
+  if (a.mine) {
+    const revenue = (S.draft.monthlyRevenue / 30) * between(0.85, 1.15);
+    toHolders = (revenue * a.router.holderBps) / 10_000;
+    const toMerchant = revenue - toHolders;
+    S.me.usdt += toMerchant;
+    a.router.toMerchant += toMerchant;
+  } else {
+    const factor = botWillPay(a, i) ? between(1.02, 1.25) : between(0.5, 0.9);
+    toHolders = (c.perPeriod / c.periodDays) * factor;
+    a.router.toMerchant += (toHolders * (10_000 - a.router.holderBps)) / a.router.holderBps;
+  }
+  a.router.toHolders += toHolders;
+  contribute(a, toHolders, t);
+}
+
 export function dailyStep(t: number) {
   for (const a of S.assets) {
     if (a.stage === "trading") {
@@ -114,14 +151,13 @@ export function dailyStep(t: number) {
       a.intraday = a.intraday.slice(-6);
       a.volume24h = Math.round(a.price * a.totalShares * between(0.003, 0.015));
       refreshBook(a);
+      routerDay(a, t);
     }
     if (a.stage === "ipo") {
       const o = a.offering;
-      const want = o.sharesForSale * o.price * a.demand * between(0.025, 0.075);
-      const shares = Math.min(want / o.price, o.sharesForSale - o.sold);
-      o.sold += shares;
-      o.raised += shares * o.price;
-      o.investors += Math.round(shares / 450);
+      const want = o.sharesForSale * o.prices[0] * a.demand * between(0.025, 0.075);
+      addBid(a, botPriceTick(o.prices.length), want);
+      o.investors += Math.round(want / 450);
     }
     if ((a.stage === "qa" || a.stage === "ipo") && a.mine && rng() < 0.55) botQuestion(a, t);
     for (const m of a.markets) {
@@ -132,6 +168,22 @@ export function dailyStep(t: number) {
       else m.no += amt;
     }
   }
+  if (S.me.autoReinvest) autoReinvest();
+}
+
+/** 分红自动复投: every held asset with at least $1 claimable buys more of itself. */
+export function autoReinvest() {
+  let spent = 0;
+  for (const a of S.assets) {
+    if (!holdsAsset(a)) continue;
+    const r = reinvestAsset(a);
+    spent += r.spent;
+  }
+  if (spent > 0) {
+    gainXp(5);
+    badge("compounder");
+  }
+  return spent;
 }
 
 export function advance(days: number) {
@@ -230,11 +282,28 @@ function botTrade(a: Asset) {
     }
   }
   b[side] = b[side].filter((l) => l.size > 1e-6);
+  trackRivalTrade(a, who.name, buy, res.size, res.cost);
   const last = res.fills[res.fills.length - 1].price;
   pushPrice(a, last);
   a.volume24h += res.cost;
   feed(buy ? "buy" : "sell", who, a.id, Math.round(res.cost));
   if (b.asks.length < 4 || b.bids.length < 4) refreshBook(a);
+}
+
+/** Keep the leaderboard investors' holdings in step with their trades (ShareToken transfer semantics). */
+function trackRivalTrade(a: Asset, name: string, buy: boolean, size: number, cost: number) {
+  const r = S.rivals.find((x) => x.name === name);
+  if (!r) return;
+  const pos = r.positions[a.id];
+  if (buy) {
+    const p = (r.positions[a.id] ??= { shares: 0, locked: 0, cost: 0, corr: 0, withdrawn: 0 });
+    moveShares(p, size, a.dps);
+    p.cost += cost;
+  } else if (pos && pos.shares > 0) {
+    const sold = Math.min(pos.shares, size);
+    pos.cost -= (pos.cost * sold) / pos.shares;
+    moveShares(pos, -sold, a.dps);
+  }
 }
 
 /** My resting limit order was hit (I'm the maker, so no fee). Mirrors ShareExchange._fillAsk/_fillBid. */
@@ -277,13 +346,10 @@ export function botTick() {
   } else if (r < 0.8 && ipos.length) {
     const a = pick(ipos);
     const o = a.offering;
-    const amt = Math.min(Math.exp(between(Math.log(50), Math.log(4_000))) * a.demand, (o.sharesForSale - o.sold) * o.price);
-    if (amt > 1) {
-      o.sold += amt / o.price;
-      o.raised += amt;
-      if (rng() < 0.6) o.investors += 1;
-      feed("subscribe", pick(PEOPLE), a.id, Math.round(amt));
-    }
+    const amt = Math.exp(between(Math.log(50), Math.log(4_000))) * a.demand;
+    addBid(a, botPriceTick(o.prices.length), amt);
+    if (rng() < 0.6) o.investors += 1;
+    feed("subscribe", pick(PEOPLE), a.id, Math.round(amt));
   } else if (r < 0.9) {
     const withMarkets = S.assets.filter((a) => a.markets.some((m) => !m.resolved && t < dueDate(a.commitment, m.period)));
     if (withMarkets.length) {
@@ -293,7 +359,9 @@ export function botTick() {
       const amt = Math.round(between(10, 300));
       if (yes) m.yes += amt;
       else m.no += amt;
-      feed("bet", pick(PEOPLE), a.id, amt);
+      const who = pick(PEOPLE);
+      S.rivals.find((x) => x.name === who.name)?.bets.push({ assetId: a.id, period: m.period, side: yes ? "yes" : "no", amount: amt });
+      feed("bet", who, a.id, amt);
     }
   } else {
     const open = S.assets.filter((a) => a.stage === "qa" || a.stage === "ipo");

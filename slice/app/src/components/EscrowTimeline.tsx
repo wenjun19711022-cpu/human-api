@@ -3,7 +3,8 @@ import type { Asset, EscrowOrder } from "../engine/types";
 import { now } from "../engine/store";
 import { ICheck, IClock, IX } from "./icons";
 import { tr } from "../lib/i18n";
-import { countdown, dateTime, shortHash, usd, shares as fmtShares, TIME } from "../lib/format";
+import { countdown, dateTime, shortHash, usd, price as fmtPrice, shares as fmtShares, TIME } from "../lib/format";
+import { orderView, roundView } from "../engine/view";
 
 type Node = { title: string; detail: string; state: "done" | "now" | "todo" | "bad" };
 
@@ -15,15 +16,27 @@ export function escrowSteps(a: Asset, e: EscrowOrder): Node[] {
   const failed = a.stage === "failed";
   const delivered = !!o.deliveredAt;
   const confirmed = e.state === "confirmed";
+  const v = orderView(a, e);
+  const r = roundView(a);
   const nodes: Node[] = [
-    { title: tr("USDT 已锁入托管合约", "USDT locked in escrow"), detail: `${usd(e.paid)} · ${dateTime(e.at)}`, state: "done" },
     {
-      title: tr("认购成团", "Round fills"),
+      title: tr("USDT 已锁入托管合约", "USDT locked in escrow"),
+      detail: `${usd(e.budget)}${r.auction ? tr(` · 最高出价 ${fmtPrice(v.limit)}`, ` · limit ${fmtPrice(v.limit)}`) : ""} · ${dateTime(e.at)}`,
+      state: "done",
+    },
+    {
+      title: tr("认购截止 · 统一清算", "Round closes · one clearing price"),
       detail: failed && !o.settleDeadline
         ? tr("未达到最低募资额，可全额退款", "Minimum not reached; fully refundable")
-        : filled
-          ? tr(`已成团 · 共 ${usd(o.raised)}`, `Filled · ${usd(o.raised)} raised`)
-          : tr(`${countdown(o.deadline, t)}后截止 · 已认购 ${Math.round((o.raised / (o.sharesForSale * o.price)) * 100)}%`, `Closes in ${countdown(o.deadline, t)} · ${Math.round((o.raised / (o.sharesForSale * o.price)) * 100)}% subscribed`),
+        : o.clearing
+          ? tr(
+              `清算价 ${fmtPrice(o.clearing.price)} · 你成交 ${usd(v.cost)}${e.budget - v.cost > 0.005 ? `，未成交 ${usd(e.budget - v.cost)}${v.unfilled > 0.005 ? " 可取回" : " 已退回"}` : ""}`,
+              `Cleared at ${fmtPrice(o.clearing.price)} · you filled ${usd(v.cost)}${e.budget - v.cost > 0.005 ? `; ${usd(e.budget - v.cost)} unfilled${v.unfilled > 0.005 ? " to withdraw" : " returned"}` : ""}`,
+            )
+          : tr(
+              `${countdown(o.deadline, t)}后截止 · 认购 ${r.coverage.toFixed(2)} 倍 · 现在清算你会成交 ${usd(v.cost)}`,
+              `Closes in ${countdown(o.deadline, t)} · ${r.coverage.toFixed(2)}x subscribed · would fill ${usd(v.cost)} now`,
+            ),
       state: failed && !o.settleDeadline ? "bad" : filled ? "done" : "now",
     },
     {
@@ -49,7 +62,7 @@ export function escrowSteps(a: Asset, e: EscrowOrder): Node[] {
       detail: confirmed
         ? `${e.auto ? tr("超时自动确认", "Auto-confirmed") : tr("已确认", "Confirmed")} · ${dateTime(e.closedAt ?? t)}`
         : e.state === "disputed"
-          ? tr(`仲裁中：${e.disputeReason ?? ""}`, `In arbitration: ${e.disputeReason ?? ""}`)
+          ? tr(`仲裁中（押金 ${usd(e.disputeBond ?? 0)}）：${e.disputeReason ?? ""} · ${countdown((e.disputedAt ?? t) + 14 * TIME.DAY, t)}后可自行退款`, `In arbitration (bond ${usd(e.disputeBond ?? 0)}): ${e.disputeReason ?? ""} · self-refund in ${countdown((e.disputedAt ?? t) + 14 * TIME.DAY, t)}`)
           : e.state === "refunded"
             ? tr("已全额退款", "Refunded in full")
             : delivered
@@ -59,7 +72,7 @@ export function escrowSteps(a: Asset, e: EscrowOrder): Node[] {
     },
     {
       title: tr("份额到账 · 款项放给商户", "Shares delivered · merchant paid"),
-      detail: confirmed ? tr(`${fmtShares(e.shares)} 份已到你的钱包`, `${fmtShares(e.shares)} shares in your wallet`) : tr(`将获得 ${fmtShares(e.shares)} 份`, `You'll get ${fmtShares(e.shares)} shares`),
+      detail: confirmed ? tr(`${fmtShares(v.shares)} 份已到你的钱包`, `${fmtShares(v.shares)} shares in your wallet`) : tr(`预计获得 ${fmtShares(v.shares)} 份`, `About ${fmtShares(v.shares)} shares`),
       state: confirmed ? "done" : "todo",
     },
   ];

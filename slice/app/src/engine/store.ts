@@ -5,14 +5,14 @@ import { makeBook } from "./market";
 import { rng } from "../lib/rand";
 import { setLang } from "../lib/i18n";
 
-const KEY = "slice-demo-v3";
+const KEY = "slice-demo-v5";
 
 function load(): State | null {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const s = JSON.parse(raw) as State;
-    return s.v === 3 ? s : null;
+    return s.v === 5 ? s : null;
   } catch {
     return null;
   }

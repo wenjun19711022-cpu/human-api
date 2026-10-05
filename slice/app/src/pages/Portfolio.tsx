@@ -1,10 +1,10 @@
 import React from "react";
 import { S, now, useWorld } from "../engine/store";
 import { claimable, dueDate, perShareDividend } from "../engine/market";
-import { claimAll, run } from "../engine/actions";
+import { claimAll, run, setAutoReinvest } from "../engine/actions";
 import { countriesOwned } from "../engine/ops";
 import { COUNTRIES, flag } from "../engine/geo";
-import { Empty, Flag, Meter, Tile } from "../components/ui";
+import { Empty, Flag, Meter, Switch, Tile } from "../components/ui";
 import { Sparkline } from "../components/charts";
 import { ICoin, IGlobe, IPie } from "../components/icons";
 import { l, tr } from "../lib/i18n";
@@ -33,7 +33,7 @@ export function Portfolio() {
     .sort((x, y) => y.value - x.value);
   const posValue = rows.reduce((s, r) => s + r.value, 0);
   const cost = rows.reduce((s, r) => s + r.p.cost, 0);
-  const escrow = S.me.escrow.filter((e) => e.state === "active" || e.state === "disputed").reduce((s, e) => s + e.paid, 0);
+  const escrow = S.me.escrow.filter((e) => e.state === "active" || e.state === "disputed").reduce((s, e) => s + e.budget - e.withdrawn + (e.disputeBond ?? 0), 0);
   const orderEscrow = S.me.orders.reduce((s, o) => s + o.escrow, 0);
   const total = S.me.usdt + posValue + escrow + orderEscrow;
   const claimTotal = S.assets.reduce((s, a) => s + claimable(S.me.positions[a.id], a.dps), 0);
@@ -91,6 +91,17 @@ export function Portfolio() {
             <button className="btn gold lg" disabled={claimTotal < 0.005} onClick={() => run(() => claimAll())}>
               <ICoin /> {tr("一键收租", "Collect")}
             </button>
+            <div className="auto">
+              <Switch on={S.me.autoReinvest} onChange={(v) => run(() => setAutoReinvest(v))} label={tr("分红自动复投", "Auto-reinvest dividends")} />
+              <span className="grow stack tight" style={{ gap: 0 }}>
+                <b>{tr("分红自动复投", "Auto-reinvest")}</b>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {S.me.autoReinvest
+                    ? tr(`每笔分红到账，自动按卖一价买入同一门生意 · 已复投 ${usd(S.me.reinvested, 2)}`, `Each payout buys more of the same business at the best ask · ${usd(S.me.reinvested, 2)} reinvested`)
+                    : tr("开启后，分红会自动买入更多份额，让收益滚雪球（ShareExchange.reinvest）", "Turn on to roll every payout into more shares (ShareExchange.reinvest)")}
+                </span>
+              </span>
+            </div>
           </div>
           <div className="card stack">
             <div className="spread">

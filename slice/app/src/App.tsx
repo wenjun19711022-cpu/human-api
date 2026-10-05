@@ -11,9 +11,10 @@ import { Confidence } from "./pages/Confidence";
 import { Me } from "./pages/Me";
 import { Merchant } from "./pages/Merchant";
 import { Console } from "./pages/Console";
+import { Leaderboards } from "./pages/Leaderboards";
 import { Effects } from "./components/Effects";
 import { Sheet } from "./components/ui";
-import { IBell, IFast, ILock, IMarket, IMoon, IPie, IPulse, IReceipt, IShield, IStore, ISun, IUser, ISpark, IGift } from "./components/icons";
+import { IBell, IFast, ILock, IMarket, IMoon, IPie, IPulse, IReceipt, IShield, IStore, ISun, IUser, ISpark, IGift, ITrophy } from "./components/icons";
 import { setLang, tr } from "./lib/i18n";
 import { date, usd } from "./lib/format";
 import { go, routeFromHash } from "./lib/nav";
@@ -132,6 +133,7 @@ const TITLES: Record<string, [string, string]> = {
   me: ["我的", "Me"],
   merchant: ["商户中心", "Merchant center"],
   console: ["平台审核台", "Verifier desk"],
+  leaderboards: ["排行榜", "Leaderboards"],
 };
 
 export function App() {
@@ -173,6 +175,7 @@ export function App() {
   else if (route === "me") page = <Me />;
   else if (route === "merchant") page = <Merchant />;
   else if (route === "console") page = <Console />;
+  else if (route === "leaderboards") page = <Leaderboards />;
   else page = <Market />;
   const title = route.startsWith("asset-") ? S.assets.find((a) => a.id === route.slice(6))?.symbol ?? "" : tr(...(TITLES[route] ?? TITLES.market));
 
@@ -183,6 +186,10 @@ export function App() {
           <span>S</span>
         </button>
         <NavButtons />
+        <button className="navbtn" aria-current={route === "leaderboards" ? "page" : undefined} onClick={() => go("leaderboards")}>
+          <ITrophy />
+          <span>{tr("榜单", "Ranks")}</span>
+        </button>
         <span className="spacer" />
         <button className="navbtn" aria-current={route === "merchant" ? "page" : undefined} onClick={() => go("merchant")}>
           <IStore />

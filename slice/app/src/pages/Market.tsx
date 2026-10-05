@@ -5,21 +5,21 @@ import { AssetCard, Tape } from "../components/AssetCard";
 import { CATEGORY, Flag, Meter, Tile, TrustRing } from "../components/ui";
 import { IClock, IGift, IStore, IShield, ILock, ISpark } from "../components/icons";
 import { l, tr } from "../lib/i18n";
-import { countdown, usdCompact, pct } from "../lib/format";
+import { countdown, usdCompact, pct, price as fmtPrice } from "../lib/format";
 import { go } from "../lib/nav";
 import { faucet, run } from "../engine/actions";
-import { yieldAt } from "../engine/market";
+import { coverage, previewClearing, raisedOf, yieldAt } from "../engine/market";
 
 type Sort = "hot" | "launch" | "yield" | "trust" | "new";
 
 function score(a: Asset, sort: Sort): number {
   switch (sort) {
     case "hot":
-      return a.volume24h + (a.stage === "ipo" ? a.offering.raised * 0.08 : 0) + a.qa.length * 120 + (a.stage === "review" ? -1e9 : 0);
+      return a.volume24h + (a.stage === "ipo" ? a.offering.committed * 0.08 : 0) + a.qa.length * 120 + (a.stage === "review" ? -1e9 : 0);
     case "launch":
       return a.stage === "ipo" ? 3e12 - a.offering.deadline : a.stage === "qa" ? 2e12 - (a.qaEndsAt ?? 0) : a.stage === "settling" ? 1e12 : -a.price;
     case "yield":
-      return a.stage === "review" ? -1 : yieldAt(a, a.stage === "trading" ? a.price : a.offering.price);
+      return a.stage === "review" ? -1 : yieldAt(a, a.stage === "trading" ? a.price : previewClearing(a.offering).price);
     case "trust":
       return a.audit?.trustScore ?? -1;
     case "new":
@@ -37,7 +37,10 @@ export function Market() {
   const live = S.assets.filter((a) => a.stage === "ipo").sort((x, y) => x.offering.deadline - y.offering.deadline);
   const featured = live.find((a) => !a.mine) ?? live[0];
   const paid = S.assets.reduce((s, a) => s + a.distributed, 0);
-  const escrow = S.assets.reduce((s, a) => s + (a.stage === "ipo" || (a.stage === "settling" && !a.offering.deliveredAt) ? a.offering.raised : 0), 0);
+  const escrow = S.assets.reduce(
+    (s, a) => s + (a.stage === "ipo" ? a.offering.committed : a.stage === "settling" && !a.offering.deliveredAt ? raisedOf(a.offering) : 0),
+    0,
+  );
   const countries = new Set(S.assets.map((a) => a.country)).size;
 
   return (
@@ -98,17 +101,25 @@ export function Market() {
               </div>
               <TrustRing audit={featured.audit} size={44} />
             </div>
-            <Meter value={featured.offering.raised / (featured.offering.sharesForSale * featured.offering.price)} />
+            <Meter value={Math.min(1, coverage(featured.offering))} />
             <div className="spread" style={{ fontSize: 13 }}>
               <span>
-                <b className="num">{usdCompact(featured.offering.raised)}</b> <span className="muted">/ {usdCompact(featured.offering.sharesForSale * featured.offering.price)}</span>
+                <b className="num">{tr(`${coverage(featured.offering).toFixed(2)} 倍`, `${coverage(featured.offering).toFixed(2)}x`)}</b>{" "}
+                <span className="muted">
+                  · {usdCompact(featured.offering.committed)} / {usdCompact(featured.offering.sharesForSale * featured.offering.prices[0])}
+                </span>
               </span>
               <span className="row muted" style={{ gap: 4 }}>
                 <IClock size={14} /> {countdown(featured.offering.deadline, t)}
               </span>
             </div>
             <div className="row wrap" style={{ gap: 6 }}>
-              <span className="pill gold">{tr(`承诺年化 ${pct(yieldAt(featured, featured.offering.price))}`, `${pct(yieldAt(featured, featured.offering.price))} promised yield`)}</span>
+              <span className="pill gold">{tr(`承诺年化 ${pct(yieldAt(featured, previewClearing(featured.offering).price))}`, `${pct(yieldAt(featured, previewClearing(featured.offering).price))} promised yield`)}</span>
+              {featured.offering.prices.length > 1 && (
+                <span className="pill accent">
+                  {tr("你来出价 · 预计清算", "Name your price · clearing")} {fmtPrice(previewClearing(featured.offering).price)}
+                </span>
+              )}
               <span className="pill">
                 <ILock /> {tr("资金托管", "Escrowed")}
               </span>

@@ -171,11 +171,16 @@ export function Me() {
         </div>
       </div>
 
-      <div className="three">
+      <div className="two">
         <button className="card stack" style={{ textAlign: "left" }} onClick={() => go("merchant")}>
           <IStore size={24} />
           <h3>{tr("商户中心", "Merchant center")}</h3>
           <p className="soft" style={{ fontSize: 13.5 }}>{tr("把你的生意推上链：提交材料、AI 尽调、公开问答、开启认购、交割、分红。", "Take your business on-chain: documents, AI review, public Q&A, round, settlement, dividends.")}</p>
+        </button>
+        <button className="card stack" style={{ textAlign: "left" }} onClick={() => go("leaderboards")}>
+          <ITrophy size={24} />
+          <h3>{tr("排行榜", "Leaderboards")}</h3>
+          <p className="soft" style={{ fontSize: 13.5 }}>{tr("先知榜、尽调猎人榜、收租榜：只奖励猜得准、问得好、真收到分红的人。", "Oracles, hunters and landlords: ranks reward calling payouts right, asking what matters and actually collecting.")}</p>
         </button>
         <button className="card stack" style={{ textAlign: "left" }} onClick={() => go("console")}>
           <IShield size={24} />
@@ -216,8 +221,8 @@ export function Me() {
         <h3>{tr("这个演示和真实链上合约的关系", "How this demo maps to the contracts")}</h3>
         <p className="soft" style={{ fontSize: 14 }}>
           {tr(
-            "页面里的每一个动作，都对应仓库中已测试的 Solidity 合约：SliceHub（上链申请与 AI 审核上链）、EscrowOffering（托管认购、确认收货、自动确认、仲裁、退款）、ShareToken（按持股实时分红）、CommitmentVault（分红承诺与保证金罚没）、ConfidenceMarket（无预言机的信心市场）、ShareExchange（链上订单簿）。演示里的资金是模拟的测试网 USDT。",
-            "Every action here maps to a tested Solidity contract in the repo: SliceHub (applications and on-chain AI audits), EscrowOffering (escrowed rounds, confirm receipt, auto-confirm, disputes, refunds), ShareToken (pro-rata dividends), CommitmentVault (bonded dividend promises and slashing), ConfidenceMarket (oracle-free confidence markets) and ShareExchange (on-chain order book). Funds in the demo are simulated testnet USDT.",
+            "页面里的每一个动作，都对应仓库中已测试的 Solidity 合约：SliceHub（上链申请、AI 审核上链、按信任分定价的保证金）、EscrowOffering（统一清算价认购、按比例配售、托管、确认收货、押金仲裁、超时自助退款）、ShareToken（按持股实时分红）、CommitmentVault（分期兑现分红承诺、只罚缺口、平台费按期兑现）、RevenueRouter（收入直连）、ConfidenceMarket（无预言机的信心市场）、ShareExchange（链上订单簿、分红一键复投）。演示里的资金是模拟的测试网 USDT。",
+            "Every action here maps to a tested Solidity contract in the repo: SliceHub (applications, on-chain AI audits, trust-priced bonds), EscrowOffering (uniform-price rounds, pro-rata allocation, escrow, confirm receipt, bonded disputes, self-refund on arbitration timeout), ShareToken (pro-rata dividends), CommitmentVault (installments, shortfall-only slashing, fee vesting), RevenueRouter (direct revenue), ConfidenceMarket (oracle-free confidence markets) and ShareExchange (on-chain order book, one-tap reinvest). Funds in the demo are simulated testnet USDT.",
           )}
         </p>
         <div className="row wrap">
